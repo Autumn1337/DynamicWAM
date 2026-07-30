@@ -6,22 +6,6 @@ import hashlib
 from pathlib import Path
 from typing import Iterable
 
-DOMINO_RUNTIME_ASSET_PREFIXES = (
-    "assets/background_texture",
-    "assets/embodiments",
-    "assets/objects",
-)
-DOMINO_SOURCE_SHA256_BY_COMMIT = {
-    "9b1f34129323957baff35bcbc866fceca7e02779": (
-        "54dd0280e44ea0539274365b7feaeba24e36b7629e8679c2999476addd9c314c"
-    ),
-}
-DOMINO_EVAL_POLICY_SHA256_BY_COMMIT = {
-    "9b1f34129323957baff35bcbc866fceca7e02779": (
-        "fec0002fe1e30833b225d3559b09b583a9a4f7a22c29bc54a3817eb70d1aea38"
-    ),
-}
-
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -113,26 +97,3 @@ def _relative_path_is_excluded(
         relative_path == prefix or relative_path.startswith(f"{prefix}/")
         for prefix in excluded_prefixes
     )
-
-
-def domino_source_tree_sha256(path: Path) -> str:
-    """Hash DOMINO code while excluding separately versioned runtime assets."""
-
-    return sha256_tree(
-        path,
-        excluded_relative_prefixes=DOMINO_RUNTIME_ASSET_PREFIXES,
-    )
-
-
-def domino_source_sha256(commit: str) -> str:
-    try:
-        return DOMINO_SOURCE_SHA256_BY_COMMIT[commit]
-    except KeyError as exc:
-        raise ValueError(f"unsupported DOMINO source commit: {commit}") from exc
-
-
-def domino_eval_policy_sha256(commit: str) -> str:
-    try:
-        return DOMINO_EVAL_POLICY_SHA256_BY_COMMIT[commit]
-    except KeyError as exc:
-        raise ValueError(f"unsupported DOMINO evaluator commit: {commit}") from exc

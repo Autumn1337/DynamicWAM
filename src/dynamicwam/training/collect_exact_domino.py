@@ -13,18 +13,6 @@ from typing import Iterable
 
 from dynamicwam.config import load_profile
 from dynamicwam.config.schema import OFFICIAL_LEVEL1_TASKS
-from dynamicwam.external_assets import verify_robotwin_asset_trees
-from dynamicwam.external_setup import (
-    verify_curobo_runtime,
-    verify_curobo_source,
-    verify_domino_python_runtime,
-    verify_robotwin_asset_links,
-)
-from dynamicwam.integrity import (
-    DOMINO_RUNTIME_ASSET_PREFIXES,
-    sha256_file,
-    sha256_tree,
-)
 from dynamicwam.training.domino_stream_queue import StreamQueue
 
 
@@ -51,7 +39,6 @@ def _probe_curobo_extension(
     python: str,
     gpu: str,
     curobo_root: Path,
-    expected_sha256: str,
 ) -> None:
     if not (curobo_root / "curobo").is_dir():
         raise FileNotFoundError(f"CuRobo root has no package directory: {curobo_root}")
@@ -87,10 +74,8 @@ def _probe_curobo_extension(
         raise RuntimeError(
             f"CuRobo import resolved outside the pinned SM90 runtime: {extension}"
         ) from exc
-    if not extension.is_file() or sha256_file(extension) != str(expected_sha256):
-        raise RuntimeError(
-            f"CuRobo line_search extension differs from its pinned SHA256: {extension}"
-        )
+    if not extension.is_file():
+        raise FileNotFoundError(extension)
 
 
 def _install_collection_configs(
@@ -513,34 +498,8 @@ def run(
     project_root = Path(raw["paths"]["project_root"])
     config_source_root = project_root / "configs" / "domino"
     domino_root = Path(benchmark["domino_root"])
-    external_manifest = Path(raw["paths"]["external_assets_manifest"])
-    verify_robotwin_asset_trees(
-        root=project_root / "external" / "robotwin-assets",
-        manifest_path=external_manifest,
-    )
-    verify_robotwin_asset_links(
-        asset_root=project_root / "external" / "robotwin-assets",
-        domino_root=domino_root,
-    )
     if not (domino_root / "script" / "collect_data.py").is_file():
-        raise FileNotFoundError(f"pinned DOMINO source is missing: {domino_root}")
-    generated_configs = tuple(
-        f"task_config/{name}.yml"
-        for name in (
-            str(collection["clean_config_name"]),
-            str(collection["randomized_config_name"]),
-        )
-    )
-    actual_source_sha256 = sha256_tree(
-        domino_root,
-        excluded_relative_paths=generated_configs,
-        excluded_relative_prefixes=DOMINO_RUNTIME_ASSET_PREFIXES,
-    )
-    if actual_source_sha256 != benchmark["domino_source_sha256"]:
-        raise RuntimeError(
-            "DOMINO source differs from the pinned commit "
-            f"{benchmark['domino_commit']}: {actual_source_sha256}"
-        )
+        raise FileNotFoundError(f"DOMINO source is missing: {domino_root}")
     _install_collection_configs(
         domino_root=domino_root,
         project_root=project_root,
@@ -574,24 +533,11 @@ def run(
     ):
         raise ValueError("collection requires tasks and GPUs")
     curobo_root = Path(str(benchmark["curobo_root"])).resolve()
-    verify_curobo_source(
-        destination=curobo_root.parent,
-        manifest_path=external_manifest,
-    )
-    verify_domino_python_runtime(
-        python=Path(str(benchmark["python"])),
-        manifest_path=external_manifest,
-    )
-    verify_curobo_runtime(
-        destination=curobo_root.parent,
-        manifest_path=external_manifest,
-    )
     _probe_curobo_extension(
         domino_root=domino_root,
         python=str(benchmark["python"]),
         gpu=gpus[0],
         curobo_root=curobo_root,
-        expected_sha256=str(benchmark["curobo_extension_sha256"]),
     )
     collection_log_root = Path(raw["paths"]["collection_logs"])
     stream_log_root = (

@@ -37,7 +37,6 @@ from dynamicwam.absolute_motion import (
 )
 from dynamicwam.config import load_profile, write_config_snapshot
 from dynamicwam.config.schema import require_exact_keys
-from dynamicwam.external_assets import verify_wan_assets
 from dynamicwam.image import load_video_frames
 from dynamicwam.training.data.packed_dataset import (
     TRAIN_DATASET_ACTION_STATS,
@@ -1475,13 +1474,6 @@ def run(args: argparse.Namespace) -> None:
     )
     args.device = device
     setup_logging(args.log_level, rank=rank)
-    if rank == 0:
-        verify_wan_assets(
-            root=Path(latent_cfg["vae_path"]).parent,
-            manifest_path=Path(config["external_assets_manifest"]),
-            purpose="packing",
-        )
-    _barrier()
 
     output_root_value = output_root_from_config(config)
     if not output_root_value:

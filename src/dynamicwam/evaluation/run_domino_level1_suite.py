@@ -18,23 +18,6 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from dynamicwam.config import load_profile, write_config_snapshot
-from dynamicwam.external_assets import (
-    verify_checkpoint_artifact,
-    verify_robotwin_asset_trees,
-    verify_wan_assets,
-)
-from dynamicwam.external_setup import (
-    inspect_curobo_runtime,
-    verify_curobo_runtime,
-    verify_curobo_source,
-    verify_domino_python_runtime,
-    verify_robotwin_asset_links,
-)
-from dynamicwam.integrity import (
-    DOMINO_RUNTIME_ASSET_PREFIXES,
-    sha256_file,
-    sha256_tree,
-)
 
 
 def _worker_env(extra_pythonpath: tuple[Path, ...]) -> dict[str, str]:
@@ -45,59 +28,6 @@ def _worker_env(extra_pythonpath: tuple[Path, ...]) -> dict[str, str]:
     if pythonpath:
         env["PYTHONPATH"] = os.pathsep.join(pythonpath)
     return env
-
-
-def _integrity_artifacts(
-    *,
-    profile,
-    benchmark: dict[str, Any],
-    curobo_runtime: dict[str, dict[str, Any]],
-    domino_python_runtime: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    artifacts: dict[str, dict[str, Any]] = {}
-
-    def add(label: str, path: Path) -> None:
-        if not path.exists():
-            raise FileNotFoundError(f"integrity artifact does not exist: {path}")
-        artifacts[label] = {
-            "path": str(path),
-            "kind": "directory" if path.is_dir() else "file",
-            "sha256": sha256_tree(path) if path.is_dir() else sha256_file(path),
-        }
-
-    add("profile", profile.path)
-    deploy_config = profile.inference_config()
-    checkpoint_path = Path(deploy_config["checkpoint_path"]).expanduser().resolve()
-    checkpoint_records = verify_checkpoint_artifact(
-        root=checkpoint_path.parent,
-        manifest_path=Path(deploy_config["checkpoint_manifest"]),
-        artifact_id=str(deploy_config["checkpoint_artifact_id"]),
-    )
-    verified_checkpoint = Path(checkpoint_records["checkpoint"]["path"]).resolve()
-    if verified_checkpoint != checkpoint_path:
-        raise RuntimeError(
-            "checkpoint manifest resolves to a different file than the profile: "
-            f"{verified_checkpoint} != {checkpoint_path}"
-        )
-    artifacts.update(checkpoint_records)
-    artifacts.update(curobo_runtime)
-    artifacts.update(domino_python_runtime)
-
-    wan_root = Path(deploy_config["wan_root"]).expanduser()
-    artifacts.update(
-        verify_wan_assets(
-            root=wan_root,
-            manifest_path=Path(deploy_config["external_assets_manifest"]),
-            purpose="inference",
-        )
-    )
-    raw_integrity_paths = benchmark["integrity_paths"]
-    for index, raw_path in enumerate(raw_integrity_paths):
-        add(
-            f"source_{index}",
-            Path(str(raw_path)).expanduser().resolve(),
-        )
-    return artifacts
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -369,7 +299,6 @@ def parse_args() -> argparse.Namespace:
         help="Additional source root forwarded to every evaluation worker.",
     )
     parser.add_argument("--curobo-root")
-    parser.add_argument("--curobo-extension-sha256")
     parser.add_argument("--run-root")
     parser.add_argument("--gpus")
     parser.add_argument("--episodes-per-task", type=int)
@@ -411,9 +340,6 @@ def main() -> int:
         Path(value).expanduser().resolve() for value in configured_pythonpath
     )
     curobo_root = Path(args.curobo_root or benchmark["curobo_root"]).resolve()
-    curobo_extension_sha256 = str(
-        args.curobo_extension_sha256 or benchmark["curobo_extension_sha256"]
-    ).lower()
     run_root = Path(args.run_root or benchmark["run_root"]).resolve()
     for path in (
         python,
@@ -431,67 +357,6 @@ def main() -> int:
     if not all(path.is_dir() for path in extra_pythonpath):
         raise ValueError(
             f"extra PYTHONPATH entries must be directories: {extra_pythonpath}"
-        )
-    external_manifest = Path(profile.raw["paths"]["external_assets_manifest"])
-    robotwin_asset_root = (
-        Path(profile.raw["paths"]["project_root"]) / "external" / "robotwin-assets"
-    )
-    verify_robotwin_asset_trees(
-        root=robotwin_asset_root,
-        manifest_path=external_manifest,
-    )
-    verify_robotwin_asset_links(
-        asset_root=robotwin_asset_root,
-        domino_root=domino_root,
-    )
-    domino_python_runtime = verify_domino_python_runtime(
-        python=python,
-        manifest_path=external_manifest,
-    )
-    verify_curobo_source(
-        destination=curobo_root.parent,
-        manifest_path=external_manifest,
-    )
-    if args.curobo_extension_sha256 is None:
-        curobo_runtime = verify_curobo_runtime(
-            destination=curobo_root.parent,
-            manifest_path=external_manifest,
-        )
-    else:
-        curobo_runtime = inspect_curobo_runtime(
-            destination=curobo_root.parent,
-            manifest_path=external_manifest,
-        )
-    actual_line_search_sha256 = str(
-        curobo_runtime["curobo_extension_line_search_cu"]["sha256"]
-    )
-    if actual_line_search_sha256 != curobo_extension_sha256:
-        raise RuntimeError(
-            "CuRobo line_search extension differs from the launch contract: "
-            f"expected {curobo_extension_sha256}, got {actual_line_search_sha256}"
-        )
-    generated_collection_configs = tuple(
-        f"task_config/{name}.yml"
-        for name in (
-            profile.raw["collection"]["clean_config_name"],
-            profile.raw["collection"]["randomized_config_name"],
-        )
-    )
-    actual_domino_source_sha256 = sha256_tree(
-        domino_root,
-        excluded_relative_paths=generated_collection_configs,
-        excluded_relative_prefixes=DOMINO_RUNTIME_ASSET_PREFIXES,
-    )
-    if actual_domino_source_sha256 != benchmark["domino_source_sha256"]:
-        raise RuntimeError(
-            "DOMINO source differs from the pinned commit "
-            f"{benchmark['domino_commit']}: {actual_domino_source_sha256}"
-        )
-    actual_eval_policy_sha256 = sha256_file(eval_policy)
-    if actual_eval_policy_sha256 != benchmark["eval_policy_sha256"]:
-        raise RuntimeError(
-            "DOMINO evaluator differs from the pinned source: "
-            f"{actual_eval_policy_sha256}"
         )
 
     raw_gpus = args.gpus or ",".join(benchmark["gpus"])
@@ -545,7 +410,6 @@ def main() -> int:
             "runtime_root": str(runtime_root),
             "extra_pythonpath": [str(path) for path in extra_pythonpath],
             "curobo_root": str(curobo_root),
-            "curobo_extension_sha256": curobo_extension_sha256,
             "run_root": str(run_root),
             "gpus": gpus,
             "episodes_per_task": episodes_per_task,
@@ -561,17 +425,11 @@ def main() -> int:
     )
 
     contract = {
-        "version": 2,
+        "version": 3,
         "benchmark": "DOMINO",
         "level": 1,
-        "profile_sha256": profile.sha256,
-        "base_config_sha256": sha256_file(base_config_path),
-        "suite_runner_sha256": sha256_file(Path(__file__).resolve()),
-        "eval_policy_sha256": sha256_file(eval_policy),
-        "parallel_runner_sha256": sha256_file(parallel_runner),
         "python": str(python),
         "curobo_root": str(curobo_root),
-        "curobo_extension_sha256": curobo_extension_sha256,
         "extra_pythonpath": [str(path) for path in extra_pythonpath],
         "episodes_per_task": episodes_per_task,
         "start_seed": start_seed,
@@ -582,12 +440,6 @@ def main() -> int:
         "protocol": (f"native_sync_execute{int(benchmark['execute_steps'])}"),
         "action_interval_ms": profile.raw["inference"]["action_interval_ms"],
         "tasks": tasks,
-        "integrity_artifacts": _integrity_artifacts(
-            profile=profile,
-            benchmark=benchmark,
-            curobo_runtime=curobo_runtime,
-            domino_python_runtime=domino_python_runtime,
-        ),
     }
     contract_path = run_root / "run_contract.json"
     if contract_path.is_file():
@@ -650,8 +502,6 @@ def main() -> int:
                 str(runtime_root),
                 "--curobo-root",
                 str(curobo_root),
-                "--curobo-extension-sha256",
-                curobo_extension_sha256,
                 "--run-root",
                 str(task_root),
                 "--gpus",

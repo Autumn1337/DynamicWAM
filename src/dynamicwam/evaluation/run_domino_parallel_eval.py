@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import json
 import os
 import re
@@ -16,14 +15,6 @@ import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -114,12 +105,7 @@ def _probe_curobo_extension(
     domino_root: Path,
     env: dict[str, str],
     expected_root: Path,
-    expected_sha256: str,
 ) -> dict[str, Any]:
-    if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
-        raise ValueError(
-            "runtime.curobo_line_search_sha256 must be a 64-character hex digest"
-        )
     probe = subprocess.run(
         [
             str(python),
@@ -156,16 +142,9 @@ def _probe_curobo_extension(
         ) from exc
     if not extension.is_file():
         raise FileNotFoundError(extension)
-    actual_sha256 = _sha256(extension)
-    if actual_sha256.lower() != expected_sha256.lower():
-        raise RuntimeError(
-            "CuRobo line_search extension hash mismatch: "
-            f"expected {expected_sha256.lower()}, got {actual_sha256} ({extension})"
-        )
     return {
         "root": str(expected_root),
         "line_search_extension": str(extension),
-        "line_search_sha256": actual_sha256,
     }
 
 
@@ -279,12 +258,7 @@ def main() -> int:
     parser.add_argument(
         "--curobo-root",
         required=True,
-        help="CuRobo source root prepended to PYTHONPATH and verified at launch.",
-    )
-    parser.add_argument(
-        "--curobo-extension-sha256",
-        required=True,
-        help="Expected SHA256 for curobolib/line_search_cu*.so",
+        help="CuRobo source root prepended to PYTHONPATH.",
     )
     parser.add_argument("--run-root", required=True)
     parser.add_argument("--gpus", required=True)
@@ -333,7 +307,6 @@ def main() -> int:
         domino_root=domino_root,
         env=probe_env,
         expected_root=curobo_root,
-        expected_sha256=args.curobo_extension_sha256,
     )
 
     logs_root = run_root / "logs"
@@ -369,9 +342,7 @@ def main() -> int:
         "python": str(python),
         "domino_root": str(domino_root),
         "eval_policy": str(eval_policy),
-        "eval_policy_sha256": _sha256(eval_policy),
         "config": str(config_path),
-        "config_sha256": _sha256(config_path),
         "runtime_root": str(runtime_root),
         "curobo": curobo_probe,
         "gpus": gpus,

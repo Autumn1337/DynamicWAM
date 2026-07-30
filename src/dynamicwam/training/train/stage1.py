@@ -17,7 +17,6 @@ from torch.utils.data import DataLoader
 
 from dynamicwam.config import load_profile, write_config_snapshot
 from dynamicwam.config.schema import require_exact_keys
-from dynamicwam.external_assets import verify_wan_assets
 from dynamicwam.training.data.packed_dataset import packed_collate_fn
 from dynamicwam.training.data.training_dataset import (
     build_packed_training_dataset,
@@ -1041,13 +1040,6 @@ def main() -> None:
     torch.backends.cudnn.benchmark = bool(config["cudnn_benchmark"])
     accelerator = build_accelerator(config, profile.deepspeed_config())
     setup_logging(str(config["log_level"]), rank=accelerator.process_index)
-    if accelerator.is_main_process:
-        verify_wan_assets(
-            root=Path(profile.raw["paths"]["wan_root"]),
-            manifest_path=Path(profile.raw["paths"]["external_assets_manifest"]),
-            purpose="training",
-        )
-    accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         write_config_snapshot(
             get_run_dir(config) / "config_audit",

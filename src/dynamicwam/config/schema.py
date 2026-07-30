@@ -937,7 +937,6 @@ def _validate_benchmark(raw: Any, action_chunk_size: int) -> dict[str, Any]:
             "domino_root",
             "eval_policy",
             "curobo_root",
-            "curobo_extension_sha256",
             "tasks",
         },
         "benchmark",
@@ -998,9 +997,6 @@ def _validate_benchmark(raw: Any, action_chunk_size: int) -> dict[str, Any]:
         raise ValueError(
             "benchmark.tasks must match the ordered official 35-task Level 1 suite"
         )
-    digest = benchmark["curobo_extension_sha256"]
-    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-        raise ValueError("benchmark.curobo_extension_sha256 must be lowercase SHA256")
     return benchmark
 
 

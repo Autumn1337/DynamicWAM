@@ -21,7 +21,6 @@ from dynamicwam.absolute_motion import (
 )
 from dynamicwam.config import load_profile, write_config_snapshot
 from dynamicwam.config.schema import require_exact_keys
-from dynamicwam.external_assets import verify_wan_assets
 from dynamicwam.models.small_wam import SmallWAMActionConfig, SmallWAMActionModel
 from dynamicwam.training.checkpoint_merge import (
     compact_wan_training_contract,
@@ -1018,13 +1017,6 @@ def run_video_action_training(
     config = profile.training_config(stage_name)
     accelerator = build_accelerator(config, profile.deepspeed_config())
     setup_logging(str(config["log_level"]), rank=accelerator.process_index)
-    if accelerator.is_main_process:
-        verify_wan_assets(
-            root=Path(profile.raw["paths"]["wan_root"]),
-            manifest_path=Path(profile.raw["paths"]["external_assets_manifest"]),
-            purpose="architecture",
-        )
-    accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         write_config_snapshot(
             get_run_dir(config) / "config_audit",

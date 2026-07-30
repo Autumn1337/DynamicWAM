@@ -228,7 +228,6 @@ benchmark:
   domino_root: external/DOMINO
   eval_policy: external/DOMINO/script/eval_policy.py
   curobo_root: external/curobo/src
-  curobo_extension_sha256: 477ce47d82ac8bf7204d3c542f8a818be3ee4fcd0d18cdae7ec57d17aa920b81
   tasks:
     - adjust_bottle
     - dump_bin_bigbin

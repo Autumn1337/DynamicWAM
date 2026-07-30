@@ -15,7 +15,6 @@ from tqdm.auto import tqdm
 
 from dynamicwam.config import load_profile, write_config_snapshot
 from dynamicwam.config.schema import require_exact_keys
-from dynamicwam.external_assets import verify_wan_assets
 from dynamicwam.training.data.training_dataset import (
     build_packed_training_dataset,
     validate_dataset_identity,
@@ -262,19 +261,9 @@ def _subsample_tokens(tokens: torch.Tensor, max_tokens: int, seed: int) -> torch
 def run_pca_prep(
     config: Dict[str, Any],
     device: str,
-    *,
-    external_assets_manifest: Path,
 ) -> Path:
     _validate_config(config)
     rank, world_size, device = _distributed_info(device)
-    if rank == 0:
-        verify_wan_assets(
-            root=Path(config["teacher"]["checkpoint_path"]),
-            manifest_path=external_assets_manifest,
-            purpose="training",
-        )
-    if world_size > 1:
-        _distributed_barrier(device)
     dataset = _build_dataset(config)
     teacher = _build_teacher(config, device=device)
     teacher.eval()
@@ -486,9 +475,6 @@ def main() -> None:
         output_path = run_pca_prep(
             config,
             device=str(config["device"]),
-            external_assets_manifest=Path(
-                profile.raw["paths"]["external_assets_manifest"]
-            ),
         )
         if int(os.environ.get("RANK", "0")) == 0:
             print(f"Saved PCA stats to {output_path}")

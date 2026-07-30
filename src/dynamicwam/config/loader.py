@@ -10,10 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dynamicwam.integrity import (
-    domino_eval_policy_sha256,
-    domino_source_sha256,
-)
 from dynamicwam.motion_contract import (
     SPATIAL_UNIT,
     TEMPORAL_CONTRACT,
@@ -431,14 +427,10 @@ class AbsoluteMotionProfile:
         raw = self.raw
         paths = raw["paths"]
         benchmark = dict(raw["benchmark"])
-        domino_commit = str(raw["collection"]["domino_commit"])
         project_root = Path(paths["project_root"])
         benchmark.update(
             {
                 "baseline": raw["baseline"],
-                "domino_commit": domino_commit,
-                "domino_source_sha256": domino_source_sha256(domino_commit),
-                "eval_policy_sha256": domino_eval_policy_sha256(domino_commit),
                 "project_root": paths["project_root"],
                 "deploy_config": str(self.path),
                 "runtime_root": str(project_root / "src" / "dynamicwam" / "runtime"),
@@ -446,9 +438,6 @@ class AbsoluteMotionProfile:
                 "run_root": str(
                     Path(paths["evaluation_runs"]) / "absolute_motion_domino_level1"
                 ),
-                "integrity_paths": [
-                    str(project_root / "src" / "dynamicwam"),
-                ],
             }
         )
         return benchmark

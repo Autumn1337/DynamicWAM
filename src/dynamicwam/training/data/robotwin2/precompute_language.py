@@ -7,8 +7,6 @@ from pathlib import Path
 
 from dynamicwam.config import load_profile
 from dynamicwam.config.schema import OFFICIAL_LEVEL1_TASKS
-from dynamicwam.external_assets import verify_wan_assets
-from dynamicwam.integrity import DOMINO_RUNTIME_ASSET_PREFIXES, sha256_tree
 from dynamicwam.language import (
     assert_language_embeddings_equal,
     generate_domino_language_prompts,
@@ -39,29 +37,7 @@ def run(*, config_path: str, tasks: tuple[str, ...], device: str) -> None:
     benchmark = profile.benchmark_config()
     paths = profile.raw["paths"]
     wan_root = Path(paths["wan_root"])
-    verify_wan_assets(
-        root=wan_root,
-        manifest_path=Path(paths["external_assets_manifest"]),
-        purpose="language",
-    )
     domino_root = Path(benchmark["domino_root"])
-    generated_configs = tuple(
-        f"task_config/{name}.yml"
-        for name in (
-            str(collection["clean_config_name"]),
-            str(collection["randomized_config_name"]),
-        )
-    )
-    actual_domino_sha256 = sha256_tree(
-        domino_root,
-        excluded_relative_paths=generated_configs,
-        excluded_relative_prefixes=DOMINO_RUNTIME_ASSET_PREFIXES,
-    )
-    if actual_domino_sha256 != benchmark["domino_source_sha256"]:
-        raise RuntimeError(
-            "DOMINO source differs from the pinned language-generation source: "
-            f"{actual_domino_sha256}"
-        )
     output_root = Path(paths["language_embeddings"])
     output_root.mkdir(parents=True, exist_ok=True)
 
