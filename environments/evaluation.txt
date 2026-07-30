@@ -1,0 +1,46 @@
+# Linux/Python 3.10 direct requirements for the retained DOMINO evaluation runtime.
+# Install DynamicWAM with `pip install -e . --no-deps` after this file.
+# CuRobo is built separately from the exact source in manifests/external_assets.json.
+addict==2.4.0
+av==17.1.0
+diffusers==0.39.0
+einops==0.8.1
+ftfy==6.3.1
+gymnasium==0.29.1
+h5py==3.16.0
+huggingface-hub==1.22.0
+imageio==2.34.2
+importlib-resources==7.1.0
+matplotlib==3.10.9
+moviepy==2.2.1
+mplib==0.2.1
+networkx==3.4.2
+ninja==1.13.0
+numcodecs==0.13.1
+numpy==1.26.4
+numpy-quaternion==2024.0.13
+open3d==0.18.0
+opencv-python==4.11.0.86
+pillow==11.3.0
+pybind11==3.0.4
+pydantic==2.13.4
+pyglet==1.5.31
+PyYAML==6.0.3
+safetensors==0.8.0
+sapien==3.0.0b1
+scikit-image==0.25.2
+scipy==1.15.3
+setuptools==80.9.0
+setuptools-scm==10.2.0
+termcolor==3.3.0
+toppra==0.6.8
+torch==2.4.1
+torchvision==0.19.1
+tqdm==4.68.4
+transformers==5.0.0rc0
+transforms3d==0.4.2
+trimesh==4.4.3
+warp-lang==1.10.1
+wheel==0.47.0
+yourdfpy==0.0.60
+zarr==2.18.3

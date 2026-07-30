@@ -1,0 +1,2565 @@
+diff --git a/description/utils/generate_episode_instructions.py b/description/utils/generate_episode_instructions.py
+index f3f00c9..35e2974 100644
+--- a/description/utils/generate_episode_instructions.py
++++ b/description/utils/generate_episode_instructions.py
+@@ -136,9 +136,22 @@ def load_task_instructions(task_name: str) -> Dict[str, Any]:
+     return task_data
+ 
+ 
++def resolve_collection_root(scene_info_path: str) -> str:
++    """Resolve the configured collection root exactly as collect_data.py does."""
++    expanded = os.path.expanduser(scene_info_path)
++    if os.path.isabs(expanded):
++        return os.path.abspath(expanded)
++    return os.path.abspath(os.path.join(parent_directory, "../..", expanded))
++
++
+ def load_scene_info(task_name: str, setting: str, scene_info_path: str) -> Dict[str, Dict]:
+     """Load the scene info from the JSON file in the data directory."""
+-    file_path = os.path.join(parent_directory, f"../../{scene_info_path}/{task_name}/{setting}/scene_info.json")
++    file_path = os.path.join(
++        resolve_collection_root(scene_info_path),
++        task_name,
++        setting,
++        "scene_info.json",
++    )
+     try:
+         with open(file_path, "r") as f:
+             scene_data = json.load(f)
+@@ -162,9 +175,19 @@ def extract_episodes_from_scene_info(scene_info: Dict) -> List[Dict[str, str]]:
+     return episodes
+ 
+ 
+-def save_episode_descriptions(task_name: str, setting: str, generated_descriptions: List[Dict]):
++def save_episode_descriptions(
++    task_name: str,
++    setting: str,
++    generated_descriptions: List[Dict],
++    scene_info_path: str,
++):
+     """Save generated descriptions to output files."""
+-    output_dir = os.path.join(parent_directory, f"../../data/{task_name}/{setting}/instructions")
++    output_dir = os.path.join(
++        resolve_collection_root(scene_info_path),
++        task_name,
++        setting,
++        "instructions",
++    )
+     os.makedirs(output_dir, exist_ok=True)
+ 
+     for episode_desc in generated_descriptions:
+@@ -272,5 +295,10 @@ if __name__ == "__main__":
+     results = generate_episode_descriptions(args.task_name, episodes, args.max_num)
+ 
+     # Save results to output files
+-    save_episode_descriptions(args.task_name, args.setting, results)
+-    print("Successfully Saved Instructions")
+\ No newline at end of file
++    save_episode_descriptions(
++        args.task_name,
++        args.setting,
++        results,
++        args_dict["save_path"],
++    )
++    print("Successfully Saved Instructions")
+diff --git a/envs/_base_task.py b/envs/_base_task.py
+index cc518dc..2af0706 100644
+--- a/envs/_base_task.py
++++ b/envs/_base_task.py
+@@ -23,6 +23,7 @@ from pathlib import Path
+ import trimesh
+ import imageio
+ import glob
++import shutil
+ 
+ 
+ from ._GLOBAL_CONFIGS import *
+@@ -89,6 +90,14 @@ class Base_Task(gym.Env):
+         self.step_lim = None
+         self.fix_gripper = False
+         self.setup_scene()
++        # Count the exact number of simulator steps between saved frames.  The
++        # wrapper composes with DynamicMotionHelper.StepCounter.
++        self._scene_step_clock = SceneStepClock(self.scene)
++        self._scene_step_clock.install()
++        # Physics steps occur during robot homing/open-gripper initialization,
++        # before task actors exist.  Install the disabled interception latch
++        # now so the unconditional per-step hook has a valid lifecycle state.
++        self._reset_interception_contact_events(target_actor=None)
+ 
+         self.left_js = None
+         self.right_js = None
+@@ -174,6 +183,8 @@ class Base_Task(gym.Env):
+         self.stage_success_tag = False
+         
+         self._saved_dynamic_motion_info = None
++        self._dynamic_motion_start_sim_step_index = None
++        self._dynamic_motion_start_sim_time_seconds = None
+ 
+         self.first_grasp_succeeded = True
+         self._dynamic_initial_z = None
+@@ -858,6 +869,284 @@ class Base_Task(gym.Env):
+         self.now_obs = deepcopy(pkl_dic)
+         return pkl_dic
+ 
++    @staticmethod
++    def _pose7_array(pose) -> np.ndarray:
++        return np.asarray(pose.p.tolist() + pose.q.tolist(), dtype=np.float64)
++
++    @staticmethod
++    def _matrix_to_pose7(matrix: np.ndarray, *, field: str) -> np.ndarray:
++        matrix = np.asarray(matrix, dtype=np.float64)
++        if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
++            raise ValueError(f"{field} must be a finite 4x4 transform, got {matrix.shape}")
++        rotation = matrix[:3, :3]
++        if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5, rtol=1e-5):
++            raise ValueError(f"{field} rotation is not orthonormal")
++        if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-5, rtol=1e-5):
++            raise ValueError(f"{field} rotation determinant is not +1")
++        quaternion = np.asarray(t3d.quaternions.mat2quat(rotation), dtype=np.float64)
++        if quaternion[0] < 0:
++            quaternion = -quaternion
++        return np.concatenate([matrix[:3, 3], quaternion], axis=0)
++
++    def _camera_poses_from_observation(self, observation: dict) -> np.ndarray:
++        """Return OpenCV-camera-to-world poses in the fixed model order."""
++        camera_order = ("head_camera", "left_camera", "right_camera")
++        missing = [name for name in camera_order if name not in observation]
++        if missing:
++            raise RuntimeError(
++                "Interception v2 capture requires head and both wrist cameras; "
++                f"missing {missing}"
++            )
++        poses = []
++        for camera_name in camera_order:
++            camera_data = observation[camera_name]
++            if "extrinsic_cv" not in camera_data:
++                raise RuntimeError(
++                    f"Interception v2 capture requires {camera_name}.extrinsic_cv"
++                )
++            world_to_camera_cv = np.asarray(camera_data["extrinsic_cv"], dtype=np.float64)
++            if world_to_camera_cv.shape == (3, 4):
++                world_to_camera_cv = np.vstack(
++                    [world_to_camera_cv, np.asarray([0.0, 0.0, 0.0, 1.0])]
++                )
++            if (
++                world_to_camera_cv.shape != (4, 4)
++                or not np.isfinite(world_to_camera_cv).all()
++                or not np.allclose(
++                    world_to_camera_cv[3],
++                    np.asarray([0.0, 0.0, 0.0, 1.0]),
++                    atol=1e-8,
++                    rtol=0,
++                )
++            ):
++                raise ValueError(
++                    f"{camera_name}.extrinsic_cv must be a finite 3x4 or homogeneous 4x4 transform"
++                )
++            camera_to_world_cv = np.linalg.inv(world_to_camera_cv)
++            poses.append(
++                self._matrix_to_pose7(
++                    camera_to_world_cv,
++                    field=f"{camera_name}.camera_to_world_cv",
++                )
++            )
++        return np.stack(poses, axis=0)
++
++    def _reset_interception_contact_events(self, target_actor=None):
++        self._interception_target_actor = target_actor
++        self._interception_contact_mask = np.zeros(2, dtype=np.bool_)
++        self._interception_contact_centroids_world = np.zeros((2, 3), dtype=np.float64)
++        self._interception_contact_point_counts = np.zeros(2, dtype=np.int64)
++        self._first_target_gripper_contact_valid = np.zeros(2, dtype=np.bool_)
++        self._first_target_gripper_contact_step_index = np.full(2, -1, dtype=np.int64)
++        self._first_target_gripper_contact_time_seconds = np.full(2, -1.0, dtype=np.float64)
++        self._first_target_gripper_contact_centroids_world = np.zeros((2, 3), dtype=np.float64)
++        self._first_target_gripper_contact_point_counts = np.zeros(2, dtype=np.int64)
++        identity_pose = np.asarray([0, 0, 0, 1, 0, 0, 0], dtype=np.float64)
++        self._first_target_gripper_contact_ee_poses_wxyz = np.tile(identity_pose, (2, 1))
++        self._first_target_gripper_contact_target_poses_wxyz = np.tile(identity_pose, (2, 1))
++
++    def _gripper_link_names_by_arm(self) -> tuple[set[str], set[str]]:
++        left_links = set(self.robot.left_fix_gripper_name)
++        right_links = set(self.robot.right_fix_gripper_name)
++        for joint, *_ in self.robot.left_gripper:
++            if joint is not None:
++                left_links.add(joint.child_link.get_name())
++        for joint, *_ in self.robot.right_gripper:
++            if joint is not None:
++                right_links.add(joint.child_link.get_name())
++        overlap = left_links & right_links
++        if overlap:
++            raise RuntimeError(
++                f"Left/right gripper link sets overlap, so contact arm is ambiguous: {sorted(overlap)}"
++            )
++        return left_links, right_links
++
++    def _current_target_gripper_contacts(
++        self, target_actor
++    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
++        target_name = target_actor.get_name()
++        left_links, right_links = self._gripper_link_names_by_arm()
++        points_by_arm = [[], []]
++        for contact in self.scene.get_contacts():
++            if not contact.points:
++                continue
++            body0 = contact.bodies[0].entity.name
++            body1 = contact.bodies[1].entity.name
++            other = None
++            if body0 == target_name:
++                other = body1
++            elif body1 == target_name:
++                other = body0
++            if other is None:
++                continue
++            arm_index = 0 if other in left_links else 1 if other in right_links else None
++            if arm_index is None:
++                continue
++            points_by_arm[arm_index].extend(
++                np.asarray(point.position, dtype=np.float64) for point in contact.points
++            )
++
++        contact_mask = np.asarray([bool(points) for points in points_by_arm], dtype=np.bool_)
++        centroids = np.zeros((2, 3), dtype=np.float64)
++        counts = np.asarray([len(points) for points in points_by_arm], dtype=np.int64)
++        for arm_index, points in enumerate(points_by_arm):
++            if points:
++                centroids[arm_index] = np.mean(np.stack(points, axis=0), axis=0)
++        return contact_mask, centroids, counts
++
++    def _update_interception_contact_events(self):
++        target_actor = self._interception_target_actor
++        if target_actor is None:
++            return
++        contact_mask, contact_centroids, contact_counts = (
++            self._current_target_gripper_contacts(target_actor)
++        )
++        self._interception_contact_mask = contact_mask
++        self._interception_contact_centroids_world = contact_centroids
++        self._interception_contact_point_counts = contact_counts
++        newly_valid = contact_mask & ~self._first_target_gripper_contact_valid
++        if not bool(newly_valid.any()):
++            return
++
++        snapshot = self._scene_step_clock.snapshot()
++        ee_poses = np.stack(
++            [
++                np.asarray(self.get_arm_pose("left"), dtype=np.float64),
++                np.asarray(self.get_arm_pose("right"), dtype=np.float64),
++            ],
++            axis=0,
++        )
++        target_pose = self._pose7_array(target_actor.get_pose())
++        for arm_index in np.flatnonzero(newly_valid):
++            self._first_target_gripper_contact_valid[arm_index] = True
++            self._first_target_gripper_contact_step_index[arm_index] = int(snapshot.step_index)
++            self._first_target_gripper_contact_time_seconds[arm_index] = float(snapshot.time_seconds)
++            self._first_target_gripper_contact_centroids_world[arm_index] = contact_centroids[arm_index]
++            self._first_target_gripper_contact_point_counts[arm_index] = contact_counts[arm_index]
++            self._first_target_gripper_contact_ee_poses_wxyz[arm_index] = ee_poses[arm_index]
++            self._first_target_gripper_contact_target_poses_wxyz[arm_index] = target_pose
++
++    def _mark_dynamic_motion_start(self, dynamic_info: dict):
++        snapshot = self._scene_step_clock.snapshot()
++        self._dynamic_motion_start_sim_step_index = int(snapshot.step_index)
++        self._dynamic_motion_start_sim_time_seconds = float(snapshot.time_seconds)
++        if isinstance(dynamic_info, dict):
++            dynamic_info["motion_start_sim_step_index"] = int(snapshot.step_index)
++            dynamic_info["motion_start_sim_time_seconds"] = float(snapshot.time_seconds)
++
++    def _build_interception_frame_data(self, observation: dict) -> dict:
++        """Build exact geometry metadata at the same instant as the RGB frame."""
++        dynamic_config = self.get_dynamic_motion_config()
++        if not dynamic_config or "target_actor" not in dynamic_config:
++            raise RuntimeError(
++                "data_type.interception=true requires get_dynamic_motion_config().target_actor"
++            )
++        target_actor = dynamic_config["target_actor"]
++        dynamic_info = getattr(self, "_saved_dynamic_motion_info", None)
++        if not isinstance(dynamic_info, dict):
++            dynamic_info = getattr(self, "_loaded_dynamic_motion_info", None)
++        if not isinstance(dynamic_info, dict):
++            raise RuntimeError(
++                "Interception capture requires saved or loaded dynamic_motion_info"
++            )
++
++        snapshot = self._scene_step_clock.snapshot()
++        motion_start_step = self._dynamic_motion_start_sim_step_index
++        motion_start_time = self._dynamic_motion_start_sim_time_seconds
++        if motion_start_step is None or motion_start_time is None:
++            raise RuntimeError("Dynamic motion start was not marked before interception capture")
++        if self._interception_target_actor is None:
++            raise RuntimeError("Interception contact-event capture was not initialized")
++        if self._interception_target_actor.get_name() != target_actor.get_name():
++            raise RuntimeError(
++                "Interception contact target does not match dynamic motion target: "
++                f"{self._interception_target_actor.get_name()} != {target_actor.get_name()}"
++            )
++
++        # Refresh instantaneous contact at this exact saved state.  First-event
++        # timing normally comes from the per-physics-step hook below; this call
++        # also covers a frame captured before the first controlled scene step.
++        self._update_interception_contact_events()
++
++        contact_poses = [
++            np.asarray(pose, dtype=np.float64)
++            for _idx, pose in target_actor.iter_contact_points(ret="list")
++            if pose is not None
++        ]
++        contact_pose_array = (
++            np.stack(contact_poses, axis=0)
++            if contact_poses
++            else np.empty((0, 7), dtype=np.float64)
++        )
++        kinematic_duration = float(dynamic_info["kinematic_duration"])
++        planned_intercept_time = float(motion_start_time) + kinematic_duration
++        end_position = np.asarray(
++            dynamic_info.get("end_position", dynamic_config.get("end_position")),
++            dtype=np.float64,
++        )
++        if end_position.shape != (3,):
++            raise ValueError(f"Expected interception end_position [3], got {end_position.shape}")
++
++        return {
++            "schema_version": np.int64(2),
++            "frame_index": np.int64(self.FRAME_IDX),
++            "sim_step_index": np.int64(snapshot.step_index),
++            "sim_time_seconds": np.float64(snapshot.time_seconds),
++            "sim_timestep_seconds": np.float64(snapshot.timestep_seconds),
++            "motion_start_sim_step_index": np.int64(motion_start_step),
++            "motion_start_sim_time_seconds": np.float64(motion_start_time),
++            "planned_intercept_sim_time_seconds": np.float64(planned_intercept_time),
++            "planned_intercept_position": end_position,
++            "target_pose_wxyz": self._pose7_array(target_actor.get_pose()),
++            "target_contact_poses_wxyz": contact_pose_array,
++            "ee_poses_wxyz": np.stack(
++                [
++                    np.asarray(self.get_arm_pose("left"), dtype=np.float64),
++                    np.asarray(self.get_arm_pose("right"), dtype=np.float64),
++                ],
++                axis=0,
++            ),
++            "camera_poses_wxyz": self._camera_poses_from_observation(observation),
++            "gripper_positions": np.asarray(
++                [
++                    self.robot.get_left_gripper_val(),
++                    self.robot.get_right_gripper_val(),
++                ],
++                dtype=np.float64,
++            ),
++            "target_gripper_contact_mask": self._interception_contact_mask.copy(),
++            "target_gripper_contact_centroids_world": (
++                self._interception_contact_centroids_world.copy()
++            ),
++            "target_gripper_contact_point_counts": (
++                self._interception_contact_point_counts.copy()
++            ),
++            "first_target_gripper_contact_valid": (
++                self._first_target_gripper_contact_valid.copy()
++            ),
++            "first_target_gripper_contact_step_index": (
++                self._first_target_gripper_contact_step_index.copy()
++            ),
++            "first_target_gripper_contact_time_seconds": (
++                self._first_target_gripper_contact_time_seconds.copy()
++            ),
++            "first_target_gripper_contact_centroids_world": (
++                self._first_target_gripper_contact_centroids_world.copy()
++            ),
++            "first_target_gripper_contact_point_counts": (
++                self._first_target_gripper_contact_point_counts.copy()
++            ),
++            "first_target_gripper_contact_ee_poses_wxyz": (
++                self._first_target_gripper_contact_ee_poses_wxyz.copy()
++            ),
++            "first_target_gripper_contact_target_poses_wxyz": (
++                self._first_target_gripper_contact_target_poses_wxyz.copy()
++            ),
++            "stable_grasp_succeeded": np.bool_(
++                getattr(self, "first_grasp_succeeded", False)
++            ),
++        }
++
+     def save_camera_rgb(self, save_path, camera_name='head_camera'):
+         self._update_render()
+         self.cameras.update_picture()
+@@ -880,6 +1169,10 @@ class Base_Task(gym.Env):
+                         os.remove(directory + file)
+ 
+         pkl_dic = self.get_obs()
++        if self.data_type.get("interception", False):
++            pkl_dic["interception"] = self._build_interception_frame_data(
++                pkl_dic["observation"]
++            )
+         save_pkl(self.folder_path["cache"] + f"{self.FRAME_IDX}.pkl", pkl_dic)  # use cache
+         self.FRAME_IDX += 1
+ 
+@@ -1915,6 +2208,9 @@ class Base_Task(gym.Env):
+             (success, start_position): Whether successful and the start position
+         """
+         self.first_grasp_succeeded = False
++        # Disable event capture during expert dry-run planning.  A fresh latch
++        # is installed only after the execution start pose has been restored.
++        self._reset_interception_contact_events(target_actor=None)
+         config = self.get_dynamic_motion_config()
+         if config:
+             z_actor = config.get('check_z_actor', config.get('target_actor'))
+@@ -1961,12 +2257,15 @@ class Base_Task(gym.Env):
+             original_orientation = loaded_info.get('original_orientation', target_actor_pose.q)
+             start_pose = sapien.Pose(p=start_pos, q=original_orientation)
+             target_actor.actor.set_pose(start_pose)
++            self._reset_interception_contact_events(target_actor=target_actor)
++            self._mark_dynamic_motion_start(loaded_info)
+             
+             if pre_motion_duration > 0:
+                 pre_motion_steps = int(pre_motion_duration / self.scene.get_timestep())
+                 for _ in range(pre_motion_steps):
+                     self._update_kinematic_tasks()
+                     self.scene.step()
++                    self._update_transient_checks()
+             
+             robot_action_sequence(need_plan_mode=False)
+             
+@@ -2057,6 +2356,8 @@ class Base_Task(gym.Env):
+             'trajectory_params': deepcopy(trajectory_params) if trajectory_params else None,
+             'random_state_after_plan': random_state_after_plan,
+         }
++        self._reset_interception_contact_events(target_actor=target_actor)
++        self._mark_dynamic_motion_start(self._saved_dynamic_motion_info)
+         
+         saved_left_joint_path = deepcopy(self.left_joint_path)
+         saved_right_joint_path = deepcopy(self.right_joint_path)
+@@ -2074,6 +2375,7 @@ class Base_Task(gym.Env):
+             for _ in range(pre_motion_steps):
+                 self._update_kinematic_tasks()
+                 self.scene.step()
++                self._update_transient_checks()
+         
+         self.save_freq = original_save_freq
+         
+@@ -3725,7 +4027,7 @@ class Base_Task(gym.Env):
+         """
+         check for transient events and set flags.
+         """
+-        pass
++        self._update_interception_contact_events()
+ 
+     # =========================================================== Control Robot ===========================================================
+ 
+@@ -3789,8 +4091,7 @@ class Base_Task(gym.Env):
+             self._update_kinematic_tasks()
+             self.scene.step()
+             
+-            if not self.transient_event:
+-                self._update_transient_checks()
++            self._update_transient_checks()
+ 
+             if self.render_freq and control_idx % self.render_freq == 0:
+                 self._update_render()
+@@ -3993,8 +4294,7 @@ class Base_Task(gym.Env):
+             self._update_kinematic_tasks()
+             self.scene.step()
+             
+-            if not self.transient_event:
+-                self._update_transient_checks()
++            self._update_transient_checks()
+                 
+             self._update_render()
+                 
+diff --git a/envs/utils/__init__.py b/envs/utils/__init__.py
+index 4654345..b31054f 100644
+--- a/envs/utils/__init__.py
++++ b/envs/utils/__init__.py
+@@ -10,3 +10,4 @@ from .pkl2hdf5 import *
+ from .images_to_video import *
+ from .trajectory_generator import *
+ from .dynamic_utils import *
++from .frame_sync import *
+diff --git a/envs/utils/frame_sync.py b/envs/utils/frame_sync.py
+new file mode 100644
+index 0000000..c04d55f
+--- /dev/null
++++ b/envs/utils/frame_sync.py
+@@ -0,0 +1,54 @@
++"""Frame-synchronous simulator clock used by interception data capture."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any, Callable
++
++
++@dataclass(frozen=True)
++class SceneClockSnapshot:
++    step_index: int
++    time_seconds: float
++    timestep_seconds: float
++
++
++class SceneStepClock:
++    """Count every successful ``scene.step()`` without changing call sites.
++
++    DOMINO already temporarily wraps ``scene.step`` in ``StepCounter`` during
++    planning.  Installing this lower-level wrapper keeps both counters valid:
++    the planning wrapper calls this one and restores it on exit.
++    """
++
++    def __init__(self, scene: Any):
++        self.scene = scene
++        self.step_index = 0
++        self.time_seconds = 0.0
++        self._original_step: Callable[[], Any] | None = None
++
++    @property
++    def installed(self) -> bool:
++        return self._original_step is not None
++
++    def install(self) -> None:
++        if self.installed:
++            raise RuntimeError("SceneStepClock is already installed")
++        self._original_step = self.scene.step
++
++        def counted_step():
++            assert self._original_step is not None
++            result = self._original_step()
++            timestep = float(self.scene.get_timestep())
++            self.step_index += 1
++            self.time_seconds += timestep
++            return result
++
++        self.scene.step = counted_step
++
++    def snapshot(self) -> SceneClockSnapshot:
++        return SceneClockSnapshot(
++            step_index=int(self.step_index),
++            time_seconds=float(self.time_seconds),
++            timestep_seconds=float(self.scene.get_timestep()),
++        )
+diff --git a/envs/utils/pkl2hdf5.py b/envs/utils/pkl2hdf5.py
+index fcb2df7..6d8cc0c 100644
+--- a/envs/utils/pkl2hdf5.py
++++ b/envs/utils/pkl2hdf5.py
+@@ -1,18 +1,23 @@
+-import h5py, pickle
++import h5py
++import pickle
+ import numpy as np
+ import os
+ import cv2
+-from collections.abc import Mapping, Sequence
+-import shutil
++from collections.abc import Mapping
+ from .images_to_video import images_to_video
+ 
+ 
+-def images_encoding(imgs):
++def images_encoding(imgs, is_rgb=True):
+     encode_data = []
+     padded_data = []
+     max_len = 0
+     for i in range(len(imgs)):
+-        success, encoded_image = cv2.imencode(".jpg", imgs[i])
++        image = imgs[i]
++        if is_rgb and image.shape[-1] == 3:
++            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
++        success, encoded_image = cv2.imencode(".jpg", image)
++        if not success:
++            raise ValueError(f"Failed to JPEG-encode RGB frame {i}")
+         jpeg_data = encoded_image.tobytes()
+         encode_data.append(jpeg_data)
+         max_len = max(max_len, len(jpeg_data))
+@@ -36,13 +41,304 @@ def parse_dict_structure(data):
+         return []
+ 
+ 
+-def append_data_to_structure(data_structure, data):
++def append_data_to_structure(data_structure, data, path=""):
++    if not isinstance(data, Mapping):
++        raise TypeError(f"Expected mapping at {path or '<root>'}, got {type(data).__name__}")
+     for key in data_structure:
+-        if key in data:
+-            if isinstance(data_structure[key], list):
+-                data_structure[key].append(data[key])
+-            elif isinstance(data_structure[key], dict):
+-                append_data_to_structure(data_structure[key], data[key])
++        key_path = f"{path}/{key}" if path else key
++        if key not in data:
++            raise KeyError(f"Frame payload is missing required field {key_path}")
++        if isinstance(data_structure[key], list):
++            data_structure[key].append(data[key])
++        elif isinstance(data_structure[key], dict):
++            append_data_to_structure(data_structure[key], data[key], key_path)
++
++
++def validate_leaf_lengths(data_structure, expected_length, path=""):
++    for key, value in data_structure.items():
++        key_path = f"{path}/{key}" if path else key
++        if isinstance(value, dict):
++            validate_leaf_lengths(value, expected_length, key_path)
++        elif isinstance(value, list) and len(value) != expected_length:
++            raise ValueError(
++                f"Field {key_path} has {len(value)} frames, expected {expected_length}"
++            )
++
++
++def validate_interception_frames(data_structure, expected_length):
++    interception = data_structure.get("interception")
++    if interception is None:
++        return
++    required = {
++        "schema_version",
++        "frame_index",
++        "sim_step_index",
++        "sim_time_seconds",
++        "sim_timestep_seconds",
++        "motion_start_sim_step_index",
++        "motion_start_sim_time_seconds",
++        "planned_intercept_sim_time_seconds",
++        "planned_intercept_position",
++        "target_pose_wxyz",
++        "target_contact_poses_wxyz",
++        "ee_poses_wxyz",
++        "camera_poses_wxyz",
++        "gripper_positions",
++        "target_gripper_contact_mask",
++        "target_gripper_contact_centroids_world",
++        "target_gripper_contact_point_counts",
++        "first_target_gripper_contact_valid",
++        "first_target_gripper_contact_step_index",
++        "first_target_gripper_contact_time_seconds",
++        "first_target_gripper_contact_centroids_world",
++        "first_target_gripper_contact_point_counts",
++        "first_target_gripper_contact_ee_poses_wxyz",
++        "first_target_gripper_contact_target_poses_wxyz",
++        "stable_grasp_succeeded",
++    }
++    missing = required - set(interception)
++    if missing:
++        raise ValueError(f"Interception frame payload is missing fields: {sorted(missing)}")
++
++    def as_array(field, dtype=None):
++        try:
++            return np.asarray(interception[field], dtype=dtype)
++        except Exception as exc:
++            raise ValueError(
++                f"Interception field {field!r} cannot be stacked across frames"
++            ) from exc
++
++    def require_shape(field, shape, dtype=None):
++        value = as_array(field, dtype=dtype)
++        if value.ndim != len(shape):
++            raise ValueError(
++                f"Interception field {field!r} must have rank {len(shape)}, got {value.shape}"
++            )
++        for axis, expected in enumerate(shape):
++            if expected is not None and value.shape[axis] != expected:
++                raise ValueError(
++                    f"Interception field {field!r} must have shape {shape}, got {value.shape}"
++                )
++        return value
++
++    frame_indices = np.asarray(interception["frame_index"], dtype=np.int64)
++    if not np.array_equal(frame_indices, np.arange(expected_length, dtype=np.int64)):
++        raise ValueError(
++            f"Interception frame_index must be contiguous 0..{expected_length - 1}"
++        )
++    schema_versions = np.asarray(interception["schema_version"], dtype=np.int64)
++    if not np.all(schema_versions == 2):
++        raise ValueError(
++            f"Unsupported interception schema versions: {np.unique(schema_versions).tolist()}"
++        )
++    sim_steps = np.asarray(interception["sim_step_index"], dtype=np.int64)
++    sim_times = np.asarray(interception["sim_time_seconds"], dtype=np.float64)
++    if np.any(np.diff(sim_steps) < 0) or np.any(np.diff(sim_times) < -1e-12):
++        raise ValueError("Interception simulator step/time metadata is not monotonic")
++    sim_timestep = require_shape(
++        "sim_timestep_seconds", (expected_length,), dtype=np.float64
++    )
++    if np.any(sim_timestep <= 0) or not np.isfinite(sim_timestep).all():
++        raise ValueError("Interception simulator timestep must be finite and positive")
++
++    scalar_fields = (
++        "schema_version",
++        "frame_index",
++        "sim_step_index",
++        "sim_time_seconds",
++        "motion_start_sim_step_index",
++        "motion_start_sim_time_seconds",
++        "planned_intercept_sim_time_seconds",
++        "stable_grasp_succeeded",
++    )
++    for field in scalar_fields:
++        require_shape(field, (expected_length,))
++    planned_position = require_shape(
++        "planned_intercept_position", (expected_length, 3), dtype=np.float64
++    )
++    target_pose = require_shape(
++        "target_pose_wxyz", (expected_length, 7), dtype=np.float64
++    )
++    target_contact_poses = require_shape(
++        "target_contact_poses_wxyz", (expected_length, None, 7), dtype=np.float64
++    )
++    ee_poses = require_shape(
++        "ee_poses_wxyz", (expected_length, 2, 7), dtype=np.float64
++    )
++    camera_poses = require_shape(
++        "camera_poses_wxyz", (expected_length, 3, 7), dtype=np.float64
++    )
++    gripper_positions = require_shape(
++        "gripper_positions", (expected_length, 2), dtype=np.float64
++    )
++    contact_mask = require_shape(
++        "target_gripper_contact_mask", (expected_length, 2), dtype=np.bool_
++    )
++    contact_centroids = require_shape(
++        "target_gripper_contact_centroids_world",
++        (expected_length, 2, 3),
++        dtype=np.float64,
++    )
++    contact_counts = require_shape(
++        "target_gripper_contact_point_counts",
++        (expected_length, 2),
++        dtype=np.int64,
++    )
++    event_valid = require_shape(
++        "first_target_gripper_contact_valid", (expected_length, 2), dtype=np.bool_
++    )
++    event_steps = require_shape(
++        "first_target_gripper_contact_step_index", (expected_length, 2), dtype=np.int64
++    )
++    event_times = require_shape(
++        "first_target_gripper_contact_time_seconds", (expected_length, 2), dtype=np.float64
++    )
++    event_centroids = require_shape(
++        "first_target_gripper_contact_centroids_world",
++        (expected_length, 2, 3),
++        dtype=np.float64,
++    )
++    event_counts = require_shape(
++        "first_target_gripper_contact_point_counts",
++        (expected_length, 2),
++        dtype=np.int64,
++    )
++    event_ee = require_shape(
++        "first_target_gripper_contact_ee_poses_wxyz",
++        (expected_length, 2, 7),
++        dtype=np.float64,
++    )
++    event_target = require_shape(
++        "first_target_gripper_contact_target_poses_wxyz",
++        (expected_length, 2, 7),
++        dtype=np.float64,
++    )
++
++    identity_pose = np.asarray([0, 0, 0, 1, 0, 0, 0], dtype=np.float64)
++    if np.any(contact_counts < 0):
++        raise ValueError("Target-gripper contact point counts must be non-negative")
++    if not np.array_equal(contact_mask, contact_counts > 0):
++        raise ValueError("Target-gripper contact mask does not match point counts")
++    if np.any(~contact_mask) and not np.allclose(
++        contact_centroids[~contact_mask], 0.0, atol=1e-12, rtol=0
++    ):
++        raise ValueError("Invalid target-gripper contact centroids must be zero")
++    if np.any(contact_mask & ~event_valid):
++        raise ValueError("Instantaneous target-gripper contact is not latched")
++    for arm_index, arm_name in enumerate(("left", "right")):
++        arm_valid = event_valid[:, arm_index]
++        if np.any(np.diff(arm_valid.astype(np.int8)) < 0):
++            raise ValueError(f"{arm_name} first-contact validity is not monotonic")
++        invalid = ~arm_valid
++        if np.any(event_steps[invalid, arm_index] != -1):
++            raise ValueError(f"{arm_name} invalid first-contact steps must be -1")
++        if np.any(event_times[invalid, arm_index] != -1.0):
++            raise ValueError(f"{arm_name} invalid first-contact times must be -1.0")
++        if np.any(event_counts[invalid, arm_index] != 0):
++            raise ValueError(f"{arm_name} invalid first-contact point counts must be zero")
++        if invalid.any() and not np.allclose(
++            event_centroids[invalid, arm_index], 0.0, atol=1e-12, rtol=0
++        ):
++            raise ValueError(f"{arm_name} invalid first-contact centroids must be zero")
++        if invalid.any() and not np.allclose(
++            event_ee[invalid, arm_index], identity_pose, atol=1e-12, rtol=0
++        ):
++            raise ValueError(f"{arm_name} invalid first-contact EE poses must be identity")
++        if invalid.any() and not np.allclose(
++            event_target[invalid, arm_index], identity_pose, atol=1e-12, rtol=0
++        ):
++            raise ValueError(f"{arm_name} invalid first-contact target poses must be identity")
++        valid_indices = np.flatnonzero(arm_valid)
++        if valid_indices.size:
++            first_index = int(valid_indices[0])
++            if event_counts[first_index, arm_index] <= 0:
++                raise ValueError(f"{arm_name} valid first-contact event has no points")
++            if not np.all(event_steps[first_index:, arm_index] == event_steps[first_index, arm_index]):
++                raise ValueError(f"{arm_name} first-contact step changes after latch")
++            if not np.allclose(
++                event_times[first_index:, arm_index],
++                event_times[first_index, arm_index],
++                atol=1e-12,
++                rtol=0,
++            ):
++                raise ValueError(f"{arm_name} first-contact time changes after latch")
++            if not np.all(
++                event_counts[first_index:, arm_index]
++                == event_counts[first_index, arm_index]
++            ):
++                raise ValueError(f"{arm_name} first-contact point count changes after latch")
++            if not np.allclose(
++                event_centroids[first_index:, arm_index],
++                event_centroids[first_index, arm_index],
++                atol=1e-12,
++                rtol=0,
++            ):
++                raise ValueError(f"{arm_name} first-contact centroid changes after latch")
++            if np.any(event_steps[first_index:, arm_index] > sim_steps[first_index:]):
++                raise ValueError(f"{arm_name} first-contact step is later than its frame")
++            if np.any(event_times[first_index:, arm_index] > sim_times[first_index:] + 1e-12):
++                raise ValueError(f"{arm_name} first-contact time is later than its frame")
++            if not np.allclose(
++                event_ee[first_index:, arm_index],
++                event_ee[first_index, arm_index],
++                atol=1e-12,
++                rtol=0,
++            ):
++                raise ValueError(f"{arm_name} first-contact EE pose changes after latch")
++            if not np.allclose(
++                event_target[first_index:, arm_index],
++                event_target[first_index, arm_index],
++                atol=1e-12,
++                rtol=0,
++            ):
++                raise ValueError(f"{arm_name} first-contact target pose changes after latch")
++
++    finite_fields = {
++        "sim_time_seconds": sim_times,
++        "sim_timestep_seconds": sim_timestep,
++        "planned_intercept_position": planned_position,
++        "target_pose_wxyz": target_pose,
++        "target_contact_poses_wxyz": target_contact_poses,
++        "ee_poses_wxyz": ee_poses,
++        "camera_poses_wxyz": camera_poses,
++        "gripper_positions": gripper_positions,
++        "target_gripper_contact_centroids_world": contact_centroids,
++        "first_target_gripper_contact_time_seconds": event_times,
++        "first_target_gripper_contact_centroids_world": event_centroids,
++        "first_target_gripper_contact_ee_poses_wxyz": event_ee,
++        "first_target_gripper_contact_target_poses_wxyz": event_target,
++    }
++    for field, value in finite_fields.items():
++        if not np.isfinite(value).all():
++            raise ValueError(f"Interception field {field!r} contains non-finite values")
++
++    for field in (
++        "motion_start_sim_step_index",
++        "motion_start_sim_time_seconds",
++        "planned_intercept_sim_time_seconds",
++        "planned_intercept_position",
++    ):
++        value = as_array(field)
++        if not np.allclose(value, value[0], atol=1e-10, rtol=1e-10):
++            raise ValueError(f"Interception field {field!r} changes within one episode")
++
++    for field, poses in (
++        ("target_pose_wxyz", target_pose),
++        ("target_contact_poses_wxyz", target_contact_poses),
++        ("ee_poses_wxyz", ee_poses),
++        ("camera_poses_wxyz", camera_poses),
++        ("first_target_gripper_contact_ee_poses_wxyz", event_ee),
++        ("first_target_gripper_contact_target_poses_wxyz", event_target),
++    ):
++        if poses.size == 0:
++            continue
++        quaternion_norms = np.linalg.norm(poses[..., 3:7], axis=-1)
++        if not np.allclose(quaternion_norms, 1.0, atol=1e-3, rtol=1e-3):
++            raise ValueError(f"Interception field {field!r} has non-unit quaternions")
++
++    stable_grasp = as_array("stable_grasp_succeeded", dtype=np.bool_)
++    if np.any(np.diff(stable_grasp.astype(np.int8)) < 0):
++        raise ValueError("stable_grasp_succeeded is not monotonic")
+ 
+ 
+ def load_pkl_file(pkl_path):
+@@ -59,7 +355,7 @@ def create_hdf5_from_dict(hdf5_group, data_dict):
+         elif isinstance(value, list):
+             value = np.array(value)
+             if "rgb" in key:
+-                encode_data, max_len = images_encoding(value)
++                encode_data, max_len = images_encoding(value, is_rgb=True)
+                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
+             else:
+                 hdf5_group.create_dataset(key, data=value)
+@@ -77,11 +373,39 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
+     for pkl_file_path in pkl_files:
+         pkl_file = load_pkl_file(pkl_file_path)
+         append_data_to_structure(data_list, pkl_file)
++    validate_leaf_lengths(data_list, len(pkl_files))
++    validate_interception_frames(data_list, len(pkl_files))
+ 
+-    images_to_video(np.array(data_list["observation"]["head_camera"]["rgb"]), out_path=video_path)
++    hdf5_path = os.fspath(hdf5_path)
++    video_path = os.fspath(video_path)
++    hdf5_dir = os.path.dirname(hdf5_path)
++    video_dir = os.path.dirname(video_path)
++    if hdf5_dir:
++        os.makedirs(hdf5_dir, exist_ok=True)
++    if video_dir:
++        os.makedirs(video_dir, exist_ok=True)
++    pid = os.getpid()
++    hdf5_stem, hdf5_ext = os.path.splitext(hdf5_path)
++    video_stem, video_ext = os.path.splitext(video_path)
++    temp_hdf5_path = f"{hdf5_stem}.tmp.{pid}{hdf5_ext or '.hdf5'}"
++    temp_video_path = f"{video_stem}.tmp.{pid}{video_ext or '.mp4'}"
+ 
+-    with h5py.File(hdf5_path, "w") as f:
+-        create_hdf5_from_dict(f, data_list)
++    try:
++        images_to_video(
++            np.array(data_list["observation"]["head_camera"]["rgb"]),
++            out_path=temp_video_path,
++        )
++        with h5py.File(temp_hdf5_path, "w") as f:
++            create_hdf5_from_dict(f, data_list)
++        # The collector uses HDF5 existence as its completion marker, so
++        # publish the video first and the HDF5 file last.
++        os.replace(temp_video_path, video_path)
++        os.replace(temp_hdf5_path, hdf5_path)
++    except Exception:
++        for temp_path in (temp_hdf5_path, temp_video_path):
++            if os.path.exists(temp_path):
++                os.remove(temp_path)
++        raise
+ 
+ 
+ def process_folder_to_hdf5_video(folder_path, hdf5_path, video_path):
+diff --git a/script/collect_data.py b/script/collect_data.py
+index a13e95c..ff09b63 100644
+--- a/script/collect_data.py
++++ b/script/collect_data.py
+@@ -131,8 +131,13 @@ def run(TASK_ENV, args):
+             print(f"Exist seed file, Start from: {epid} / {suc_num}")
+ 
+         save_failed_cases = args.get("save_failed_cases", False)
++        max_seed_attempts = args.get("max_seed_attempts")
++        if max_seed_attempts is not None and int(max_seed_attempts) <= 0:
++            raise ValueError("max_seed_attempts must be positive when configured")
++        seed_attempts = 0
+         
+         while suc_num < args["episode_num"]:
++            seed_attempts += 1
+             try:
+                 TASK_ENV.setup_demo(now_ep_num=suc_num, seed=epid, **args)
+                 TASK_ENV.play_once()
+@@ -174,6 +179,8 @@ def run(TASK_ENV, args):
+                 print(" -------------")
+                 print(f"simulate data episode {suc_num} fail! (seed = {epid})")
+                 print("Error: ", e)
++                if args.get("debug_traceback", False):
++                    traceback.print_exc()
+                 print(" -------------")
+                 fail_num += 1
+                 TASK_ENV.close_env()
+@@ -187,6 +194,15 @@ def run(TASK_ENV, args):
+             with open(os.path.join(args["save_path"], "seed.txt"), "w") as file:
+                 for sed in seed_list:
+                     file.write("%s " % sed)
++            if (
++                max_seed_attempts is not None
++                and seed_attempts >= int(max_seed_attempts)
++                and suc_num < args["episode_num"]
++            ):
++                raise RuntimeError(
++                    "Seed planning did not produce the requested episodes within "
++                    f"max_seed_attempts={int(max_seed_attempts)}"
++                )
+ 
+         print(f"\nComplete simulation, failed \033[91m{fail_num}\033[0m times / {epid} tries \n")
+     else:
+@@ -288,6 +304,8 @@ def run(TASK_ENV, args):
+                     
+             except Exception as e:
+                 print(f"\033[91mException during render for seed {current_seed}: {e}\033[0m")
++                if args.get("debug_traceback", False):
++                    traceback.print_exc()
+                 failed_episode_indices.append(episode_idx)
+                 
+                 TASK_ENV.close_env(clear_cache=True)
+@@ -314,6 +332,14 @@ def run(TASK_ENV, args):
+             next_new_seed = max(seed_list) + 1 if seed_list else 0
+             new_traj_idx = len(seed_list)
+             regen_attempts = 0
++            max_regeneration_attempts = args.get("max_regeneration_attempts")
++            if (
++                max_regeneration_attempts is not None
++                and int(max_regeneration_attempts) <= 0
++            ):
++                raise ValueError(
++                    "max_regeneration_attempts must be positive when configured"
++                )
+             
+             while successful_episode_count < args["episode_num"]:
+                 try:
+@@ -378,11 +404,22 @@ def run(TASK_ENV, args):
+                         time.sleep(0.3)
+                 except Exception as e:
+                     print(f"Error with seed {next_new_seed}: {e}")
++                    if args.get("debug_traceback", False):
++                        traceback.print_exc()
+                     TASK_ENV.close_env(clear_cache=True)
+                     time.sleep(0.5)
+                 
+                 next_new_seed += 1
+                 regen_attempts += 1
++                if (
++                    max_regeneration_attempts is not None
++                    and regen_attempts >= int(max_regeneration_attempts)
++                    and successful_episode_count < args["episode_num"]
++                ):
++                    raise RuntimeError(
++                        "Data regeneration did not produce the requested episodes within "
++                        f"max_regeneration_attempts={int(max_regeneration_attempts)}"
++                    )
+ 
+         final_pairs = []
+         existing_seed_count = min(st_idx, len(seed_list))
+diff --git a/script/config_overrides.py b/script/config_overrides.py
+new file mode 100644
+index 0000000..510e7cd
+--- /dev/null
++++ b/script/config_overrides.py
+@@ -0,0 +1,39 @@
++"""Typed, non-executable parsing for DOMINO CLI config overrides."""
++
++from __future__ import annotations
++
++import re
++from typing import Any, Sequence
++
++import yaml
++
++
++_KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
++
++
++def parse_override_value(raw: str) -> Any:
++    """Parse one JSON/YAML scalar or collection without executing code."""
++    try:
++        return yaml.safe_load(raw)
++    except yaml.YAMLError as exc:
++        raise ValueError(f"invalid override value {raw!r}") from exc
++
++
++def parse_override_pairs(pairs: Sequence[str]) -> dict[str, Any]:
++    if len(pairs) % 2:
++        raise ValueError(
++            "override arguments must be --key value pairs; "
++            f"received {len(pairs)} tokens"
++        )
++    overrides: dict[str, Any] = {}
++    for index in range(0, len(pairs), 2):
++        raw_key = pairs[index]
++        if not raw_key.startswith("--"):
++            raise ValueError(f"override key must start with '--': {raw_key!r}")
++        key = raw_key[2:]
++        if _KEY_PATTERN.fullmatch(key) is None:
++            raise ValueError(f"invalid override key: {raw_key!r}")
++        if key in overrides:
++            raise ValueError(f"duplicate override key: {key!r}")
++        overrides[key] = parse_override_value(pairs[index + 1])
++    return overrides
+diff --git a/script/eval_policy.py b/script/eval_policy.py
+index 42db1ec..70c5934 100644
+--- a/script/eval_policy.py
++++ b/script/eval_policy.py
+@@ -1,6 +1,8 @@
+ import sys
+ import os
++import shutil
+ import subprocess
++import time
+ 
+ sys.path.append("./")
+ sys.path.append(f"./policy")
+@@ -22,6 +24,7 @@ import pdb
+ 
+ from generate_episode_instructions import *
+ from eval_metrics import EvalMetricsTracker, AggregatedMetrics, EpisodeMetrics
++from config_overrides import parse_override_pairs
+ 
+ current_file_path = os.path.abspath(__file__)
+ parent_directory = os.path.dirname(current_file_path)
+@@ -80,6 +83,19 @@ def main(usr_args):
+     with open(f"./task_config/{task_config}.yml", "r", encoding="utf-8") as f:
+         args = yaml.load(f.read(), Loader=yaml.FullLoader)
+ 
++    # Video encoding is an evaluation artifact, not part of the simulator or
++    # policy observation contract. Allow process-isolated score runs to disable
++    # only that I/O path while leaving camera rendering and success checks
++    # unchanged.
++    if "eval_video_log" in usr_args:
++        eval_video_log = usr_args["eval_video_log"]
++        if type(eval_video_log) is not bool:
++            raise TypeError(
++                "eval_video_log override must be a boolean, got "
++                f"{type(eval_video_log).__name__}: {eval_video_log!r}"
++            )
++        args["eval_video_log"] = eval_video_log
++
+     args['task_name'] = task_name
+     args["task_config"] = task_config
+     args["ckpt_setting"] = ckpt_setting
+@@ -123,7 +139,11 @@ def main(usr_args):
+     else:
+         embodiment_name = str(embodiment_type[0]) + "+" + str(embodiment_type[1])
+ 
+-    save_dir = Path(f"eval_result/{task_name}/{policy_name}/{task_config}/{ckpt_setting}/{current_time}")
++    # Keep benchmark outputs out of a shared DOMINO checkout when requested.
++    # This is especially important for multi-GPU evaluation: independent
++    # processes must not race while creating or discovering eval_result files.
++    output_root = Path(usr_args.get("eval_output_root", "eval_result")).expanduser()
++    save_dir = output_root / task_name / policy_name / task_config / str(ckpt_setting) / current_time
+     save_dir.mkdir(parents=True, exist_ok=True)
+ 
+     if args["eval_video_log"]:
+@@ -163,9 +183,21 @@ def main(usr_args):
+ 
+     seed = usr_args["seed"]
+ 
+-    st_seed = 100000 * (1 + seed)
++    # Keep the original seed-block convention by default, but allow an
++    # evaluator to resume from an exact raw seed.  This is needed for
++    # process-isolated evaluation: each native SAPIEN process owns exactly one
++    # reported episode, while the next process continues after the actual seed
++    # selected by DOMINO's expert-validity filter.
++    st_seed = int(usr_args.get("start_seed", 100000 * (1 + seed)))
++    if st_seed < 0:
++        raise ValueError(f"start_seed must be non-negative, got {st_seed}")
+     suc_nums = []
+-    test_num = 100
++    # Respect the policy-eval config. The previous hard-coded 100 silently
++    # turned every purported smoke run (for example episode_num: 2) into a
++    # full benchmark and made targeted video generation impossible.
++    test_num = int(usr_args.get("episode_num", 100))
++    if test_num <= 0:
++        raise ValueError(f"episode_num must be positive, got {test_num}")
+     topk = 1
+ 
+     model = get_model(usr_args)
+@@ -248,33 +280,70 @@ def eval_policy(task_name,
+     
+     # Initialize aggregated metrics collector
+     aggregated_metrics = AggregatedMetrics()
++    # DOMINO's expert pass is a feasibility filter: motion planning failures
++    # reject a raw seed and advance to the next one.  Keep that benchmark
++    # behavior, but bound repeated unexpected exceptions so a real code defect
++    # cannot be hidden in an infinite seed scan.
++    unexpected_expert_rejections = 0
++    consecutive_exception_signature = None
++    consecutive_exception_count = 0
++    max_unexpected_expert_rejections = max(100, 20 * test_num)
++    max_consecutive_same_exception = 20
+ 
+     while succ_seed < test_num:
+         render_freq = args["render_freq"]
+         args["render_freq"] = 0
+ 
+         if expert_check:
++            expert_started = time.perf_counter()
++            print(f"[expert-check] seed={now_seed} setup start")
+             try:
+                 TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
++                setup_seconds = time.perf_counter() - expert_started
++                print(f"[expert-check] seed={now_seed} setup done in {setup_seconds:.1f}s; play_once start")
+                 episode_info = TASK_ENV.play_once()
++                play_seconds = time.perf_counter() - expert_started - setup_seconds
++                print(f"[expert-check] seed={now_seed} play_once done in {play_seconds:.1f}s")
+                 TASK_ENV.close_env()
++                consecutive_exception_signature = None
++                consecutive_exception_count = 0
+             except UnStableError as e:
+-                # print(" -------------")
+-                # print("Error: ", e)
+-                # print(" -------------")
++                elapsed = time.perf_counter() - expert_started
++                print(f"[expert-check] seed={now_seed} unstable after {elapsed:.1f}s: {e}")
+                 TASK_ENV.close_env()
+                 now_seed += 1
+                 args["render_freq"] = render_freq
+                 continue
+             except Exception as e:
+-                # stack_trace = traceback.format_exc()
+-                # print(" -------------")
+-                # print("Error: ", e)
+-                # print(" -------------")
+-                TASK_ENV.close_env()
++                elapsed = time.perf_counter() - expert_started
++                signature = (type(e).__name__, str(e))
++                unexpected_expert_rejections += 1
++                if signature == consecutive_exception_signature:
++                    consecutive_exception_count += 1
++                else:
++                    consecutive_exception_signature = signature
++                    consecutive_exception_count = 1
++                print(
++                    f"[expert-check] seed={now_seed} rejected after {elapsed:.1f}s "
++                    f"exception={signature!r} total_rejections={unexpected_expert_rejections} "
++                    f"consecutive_same={consecutive_exception_count}"
++                )
++                traceback.print_exc()
++                try:
++                    TASK_ENV.close_env()
++                except Exception:
++                    traceback.print_exc()
++                if (
++                    unexpected_expert_rejections >= max_unexpected_expert_rejections
++                    or consecutive_exception_count >= max_consecutive_same_exception
++                ):
++                    raise RuntimeError(
++                        "Expert feasibility filtering exceeded its safety bound: "
++                        f"seed={now_seed}, total_rejections={unexpected_expert_rejections}, "
++                        f"consecutive_same={consecutive_exception_count}, signature={signature!r}"
++                    ) from e
+                 now_seed += 1
+                 args["render_freq"] = render_freq
+-                # print("error occurs !")
+                 continue
+ 
+         if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
+@@ -337,9 +406,20 @@ def eval_policy(task_name,
+         TASK_ENV._metrics_tracker = metrics_tracker
+ 
+         if TASK_ENV.eval_video_path is not None:
++            ffmpeg_executable = shutil.which("ffmpeg")
++            if ffmpeg_executable is None:
++                try:
++                    import imageio_ffmpeg
++
++                    ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
++                except (ImportError, RuntimeError) as exc:
++                    raise RuntimeError(
++                        "Video evaluation requires ffmpeg. Install the system binary "
++                        "or the imageio-ffmpeg Python package."
++                    ) from exc
+             ffmpeg = subprocess.Popen(
+                 [
+-                    "ffmpeg",
++                    ffmpeg_executable,
+                     "-y",
+                     "-loglevel",
+                     "error",
+@@ -455,6 +535,10 @@ def eval_policy(task_name,
+         )
+         now_seed += 1
+ 
++    # The adapter normally finalizes episode N when episode N+1 starts.  Flush
++    # the last episode explicitly so one-episode, process-isolated runs retain
++    # their CI/sync telemetry in the log as well.
++    reset_func(model)
+     return now_seed, TASK_ENV.suc, aggregated_metrics
+ 
+ 
+@@ -467,19 +551,6 @@ def parse_args_and_config():
+     with open(args.config, "r", encoding="utf-8") as f:
+         config = yaml.safe_load(f)
+ 
+-    # Parse overrides
+-    def parse_override_pairs(pairs):
+-        override_dict = {}
+-        for i in range(0, len(pairs), 2):
+-            key = pairs[i].lstrip("--")
+-            value = pairs[i + 1]
+-            try:
+-                value = eval(value)
+-            except:
+-                pass
+-            override_dict[key] = value
+-        return override_dict
+-
+     if args.overrides:
+         overrides = parse_override_pairs(args.overrides)
+         config.update(overrides)
+diff --git a/script/extract_dynamic_gt.py b/script/extract_dynamic_gt.py
+index 69ca482..4056ae5 100644
+--- a/script/extract_dynamic_gt.py
++++ b/script/extract_dynamic_gt.py
+@@ -34,6 +34,8 @@ import numpy as np
+ import sapien.core as sapien  # pyright: ignore[reportMissingImports]
+ import yaml
+ 
++from interception_hdf5 import load_frame_synchronous_interception
++
+ 
+ SUPPORTED_TRAJECTORY_TYPES = {"velocity", "trajectory", "segmented"}
+ 
+@@ -346,6 +348,8 @@ def sanity_checks(
+     pose7_sim: np.ndarray,
+     pose7_aligned: np.ndarray,
+     frame_count: int,
++    *,
++    check_start_position: bool = True,
+ ) -> tuple[list[str], dict[str, float]]:
+     warnings: list[str] = []
+     metrics: dict[str, float] = {}
+@@ -356,10 +360,11 @@ def sanity_checks(
+         warnings.append(f"unsupported trajectory type: {traj_type}")
+ 
+     start_position = np.asarray(dynamic_info.get("start_position", [np.nan, np.nan, np.nan]), dtype=np.float64)
+-    start_err = float(np.linalg.norm(pose7_sim[0, :3] - start_position))
+-    metrics["start_position_l2_error"] = start_err
+-    if start_err > 1e-3:
+-        warnings.append(f"large start pose error: {start_err:.6f}")
++    if check_start_position:
++        start_err = float(np.linalg.norm(pose7_sim[0, :3] - start_position))
++        metrics["start_position_l2_error"] = start_err
++        if start_err > 1e-3:
++            warnings.append(f"large start pose error: {start_err:.6f}")
+ 
+     if pose7_aligned.shape[0] != frame_count:
+         warnings.append(f"aligned length mismatch: {pose7_aligned.shape[0]} vs {frame_count}")
+@@ -446,6 +451,14 @@ def parse_args() -> argparse.Namespace:
+         action="store_true",
+         help="Force replay even if dynamic_motion_info exists in _traj_data",
+     )
++    parser.add_argument(
++        "--allow_legacy_uniform_resample",
++        action="store_true",
++        help=(
++            "Allow old episodes without interception metadata to use the "
++            "untrusted uniform seed-replay resampling path"
++        ),
++    )
+     parser.add_argument(
+         "--skip_existing",
+         action="store_true",
+@@ -589,7 +602,9 @@ def load_result_from_output_file(out_file: Path) -> dict[str, Any]:
+         payload = pickle.load(f)
+     pose7_sim = np.asarray(payload["pose7_sim"])
+     sim_timestep = float(payload["sim_timestep"])
+-    avg_speed = compute_avg_speed_mps(pose7_sim, sim_timestep)
++    avg_speed = float(
++        payload.get("avg_speed_mps", compute_avg_speed_mps(pose7_sim, sim_timestep))
++    )
+     return {
+         "status": "success",
+         "source_dynamic_info": payload.get("source_dynamic_info", "raw_replay"),
+@@ -599,6 +614,7 @@ def load_result_from_output_file(out_file: Path) -> dict[str, Any]:
+         "sanity_warnings": payload.get("sanity_warnings", []),
+         "sanity_metrics": payload.get("sanity_metrics", {}),
+         "avg_speed_mps": float(avg_speed),
++        "frame_alignment_source": payload.get("frame_alignment_source", "unknown"),
+     }
+ 
+ 
+@@ -680,6 +696,7 @@ def run_episode_subprocess_fallback(
+     task_output_dir: Path,
+     episode_idx: int,
+     force_replay: bool,
++    allow_legacy_uniform_resample: bool,
+     parent_skip_existing: bool,
+     clear_cache_freq: int,
+     fallback_subprocess_retries: int,
+@@ -710,6 +727,8 @@ def run_episode_subprocess_fallback(
+     ]
+     if force_replay:
+         cmd.append("--force_replay")
++    if allow_legacy_uniform_resample:
++        cmd.append("--allow_legacy_uniform_resample")
+     if parent_skip_existing:
+         cmd.append("--skip_existing")
+ 
+@@ -749,6 +768,7 @@ def run_single_task(
+     episode_start: int,
+     episode_end: int,
+     force_replay: bool,
++    allow_legacy_uniform_resample: bool,
+     skip_existing: bool,
+     gpu_error_retries: int,
+     clear_cache_freq: int,
+@@ -777,6 +797,7 @@ def run_single_task(
+     print(f"output_dir:     {task_output_dir}")
+     print(f"episodes:       {selected[:5]}{' ...' if len(selected) > 5 else ''} (total={len(selected)})")
+     print(f"force_replay:   {force_replay}")
++    print(f"allow_legacy_uniform_resample: {allow_legacy_uniform_resample}")
+     print(f"skip_existing:  {skip_existing}")
+     print(f"clear_cache_freq: {clear_cache_freq}")
+     print("quat_order:     wxyz (SAPIEN)")
+@@ -802,23 +823,44 @@ def run_single_task(
+ 
+             out_file = episode_output_file(task_output_dir, episode_idx)
+             if skip_existing and out_file.exists():
+-                result.update(
+-                    {
+-                        "status": "skipped",
+-                        "reason": "output_exists",
+-                        "output_file": str(out_file),
+-                    }
++                existing = load_result_from_output_file(out_file)
++                existing_alignment = existing.get("frame_alignment_source")
++                can_skip = bool(
++                    existing_alignment == "frame_synchronous_hdf5_v1"
++                    or allow_legacy_uniform_resample
++                )
++                if can_skip:
++                    result.update(
++                        {
++                            "status": "skipped",
++                            "reason": "output_exists",
++                            "output_file": str(out_file),
++                            "frame_alignment_source": existing_alignment,
++                        }
++                    )
++                    skip_count += 1
++                    print(
++                        f"  - skipped | output exists: {out_file} | "
++                        f"alignment={existing_alignment}"
++                    )
++                    result["elapsed_sec"] = round(time.time() - t0, 4)
++                    results.append(result)
++                    continue
++                print(
++                    f"  - regenerate | existing output alignment={existing_alignment!r} "
++                    "does not satisfy exact frame-sync contract"
+                 )
+-                skip_count += 1
+-                print(f"  - skipped | output exists: {out_file}")
+-                result["elapsed_sec"] = round(time.time() - t0, 4)
+-                results.append(result)
+-                continue
+ 
+             frame_count = episode_frame_count(raw_data_dir, episode_idx)
+             result["frame_count"] = frame_count
+ 
+             def process_episode_once() -> dict[str, Any]:
++                episode_hdf5 = raw_data_dir / "data" / f"episode{episode_idx}.hdf5"
++                frame_sync = load_frame_synchronous_interception(
++                    episode_hdf5,
++                    expected_frames=frame_count,
++                    required=not allow_legacy_uniform_resample,
++                )
+                 dynamic_info = None
+                 source = "raw_replay"
+                 if not force_replay:
+@@ -840,20 +882,67 @@ def run_single_task(
+                     raise RuntimeError("dynamic_info has no trajectory_params")
+                 trajectory_type = traj_params.get("type")
+ 
+-                pose7_sim, sim_timestep, loop_guard_hit = simulate_pose7_from_dynamic_info(
+-                    task_name,
+-                    base_task_args,
+-                    episode_idx,
+-                    seed,
+-                    dynamic_info,
+-                    clear_cache_on_close=force_clear_cache_on_close,
+-                )
+-                pose7_frame_aligned = resample_pose7(pose7_sim, frame_count)
+-                warnings, metrics = sanity_checks(dynamic_info, pose7_sim, pose7_frame_aligned, frame_count)
+-                if loop_guard_hit:
+-                    warnings.append("simulation loop guard triggered before kinematic task cleanup")
+-
+-                avg_speed_mps = compute_avg_speed_mps(pose7_sim, sim_timestep)
++                if frame_sync is not None:
++                    pose7_frame_aligned = np.asarray(
++                        frame_sync["target_pose_wxyz"], dtype=np.float64
++                    )
++                    # Keep the legacy key for PUMA's travel-distance gate, but
++                    # its samples are now the exact captured frames rather
++                    # than a separately replayed, uniformly warped trajectory.
++                    pose7_sim = pose7_frame_aligned.copy()
++                    frame_times = np.asarray(
++                        frame_sync["sim_time_seconds"], dtype=np.float64
++                    )
++                    positive_intervals = np.diff(frame_times)
++                    positive_intervals = positive_intervals[positive_intervals > 0]
++                    sim_timestep = float(
++                        np.median(positive_intervals)
++                        if positive_intervals.size
++                        else np.median(frame_sync["sim_timestep_seconds"])
++                    )
++                    frame_duration = float(frame_times[-1] - frame_times[0])
++                    travel_distance = float(
++                        np.linalg.norm(np.diff(pose7_sim[:, :3], axis=0), axis=1).sum()
++                    )
++                    avg_speed_mps = (
++                        travel_distance / frame_duration
++                        if frame_duration > 1e-12
++                        else 0.0
++                    )
++                    alignment_source = "frame_synchronous_hdf5_v1"
++                    warnings, metrics = sanity_checks(
++                        dynamic_info,
++                        pose7_sim,
++                        pose7_frame_aligned,
++                        frame_count,
++                        check_start_position=False,
++                    )
++                    metrics["frame_time_duration_seconds"] = frame_duration
++                else:
++                    pose7_sim, sim_timestep, loop_guard_hit = simulate_pose7_from_dynamic_info(
++                        task_name,
++                        base_task_args,
++                        episode_idx,
++                        seed,
++                        dynamic_info,
++                        clear_cache_on_close=force_clear_cache_on_close,
++                    )
++                    pose7_frame_aligned = resample_pose7(pose7_sim, frame_count)
++                    warnings, metrics = sanity_checks(
++                        dynamic_info,
++                        pose7_sim,
++                        pose7_frame_aligned,
++                        frame_count,
++                    )
++                    if loop_guard_hit:
++                        warnings.append(
++                            "simulation loop guard triggered before kinematic task cleanup"
++                        )
++                    warnings.append(
++                        "legacy uniform replay resampling is not frame-synchronous"
++                    )
++                    avg_speed_mps = compute_avg_speed_mps(pose7_sim, sim_timestep)
++                    alignment_source = "legacy_uniform_resample_untrusted"
+ 
+                 payload = {
+                     "task_name": task_name,
+@@ -869,12 +958,22 @@ def run_single_task(
+                     "trajectory_params": traj_params,
+                     "pose7_sim": pose7_sim,
+                     "pose7_frame_aligned": pose7_frame_aligned,
++                    "frame_alignment_source": alignment_source,
++                    "frame_alignment_is_exact": bool(frame_sync is not None),
++                    "frame_synchronous_interception": frame_sync,
+                     "sanity_metrics": metrics,
+                     "sanity_warnings": warnings,
+                     "avg_speed_mps": float(avg_speed_mps),
+                 }
+-                with out_file.open("wb") as f:
+-                    pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
++                temp_out_file = out_file.with_name(f"{out_file.name}.tmp.{os.getpid()}")
++                try:
++                    with temp_out_file.open("wb") as f:
++                        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
++                    temp_out_file.replace(out_file)
++                except Exception:
++                    if temp_out_file.exists():
++                        temp_out_file.unlink()
++                    raise
+ 
+                 return {
+                     "status": "success",
+@@ -885,6 +984,7 @@ def run_single_task(
+                     "sanity_warnings": warnings,
+                     "sanity_metrics": metrics,
+                     "avg_speed_mps": float(avg_speed_mps),
++                    "frame_alignment_source": alignment_source,
+                 }
+ 
+             processed = False
+@@ -900,6 +1000,7 @@ def run_single_task(
+                         f"  - ok | seed={seed} | traj_type={episode_result.get('trajectory_type')} | "
+                         f"sim_steps={episode_result.get('pose7_sim_steps')} | "
+                         f"avg_speed={episode_result.get('avg_speed_mps', 0.0):.4f} m/s | "
++                        f"alignment={episode_result.get('frame_alignment_source')} | "
+                         f"warnings={len(episode_result.get('sanity_warnings', []))}"
+                     )
+                     processed = True
+@@ -926,6 +1027,7 @@ def run_single_task(
+                     task_output_dir=task_output_dir,
+                     episode_idx=episode_idx,
+                     force_replay=force_replay,
++                    allow_legacy_uniform_resample=allow_legacy_uniform_resample,
+                     parent_skip_existing=skip_existing,
+                     clear_cache_freq=clear_cache_freq,
+                     fallback_subprocess_retries=fallback_subprocess_retries,
+@@ -939,6 +1041,7 @@ def run_single_task(
+                         f"  - ok(fallback) | seed={seed} | traj_type={episode_result.get('trajectory_type')} | "
+                         f"sim_steps={episode_result.get('pose7_sim_steps')} | "
+                         f"avg_speed={episode_result.get('avg_speed_mps', 0.0):.4f} m/s | "
++                        f"alignment={episode_result.get('frame_alignment_source')} | "
+                         f"warnings={len(episode_result.get('sanity_warnings', []))}"
+                     )
+                     processed = True
+@@ -973,6 +1076,7 @@ def run_single_task(
+         "episodes_failed": fail_count,
+         "episodes_skipped": skip_count,
+         "force_replay": bool(force_replay),
++        "allow_legacy_uniform_resample": bool(allow_legacy_uniform_resample),
+         "skip_existing": bool(skip_existing),
+         "results": results,
+     }
+@@ -1000,6 +1104,7 @@ def build_single_task_command(
+     episode_start: int,
+     episode_end: int,
+     force_replay: bool,
++    allow_legacy_uniform_resample: bool,
+     skip_existing: bool,
+     gpu_error_retries: int,
+     clear_cache_freq: int,
+@@ -1032,6 +1137,8 @@ def build_single_task_command(
+     ]
+     if force_replay:
+         cmd.append("--force_replay")
++    if allow_legacy_uniform_resample:
++        cmd.append("--allow_legacy_uniform_resample")
+     if skip_existing:
+         cmd.append("--skip_existing")
+     if disable_gpu_subprocess_fallback:
+@@ -1049,6 +1156,7 @@ def run_parallel_launcher(
+     episode_start: int,
+     episode_end: int,
+     force_replay: bool,
++    allow_legacy_uniform_resample: bool,
+     skip_existing: bool,
+     parallel_workers: int,
+     gpu_ids: list[str],
+@@ -1155,6 +1263,7 @@ def run_parallel_launcher(
+             episode_start=episode_start,
+             episode_end=episode_end,
+             force_replay=force_replay,
++            allow_legacy_uniform_resample=allow_legacy_uniform_resample,
+             skip_existing=skip_existing_for_this_run,
+             gpu_error_retries=gpu_error_retries,
+             clear_cache_freq=clear_cache_freq,
+@@ -1322,6 +1431,7 @@ def main() -> None:
+                 episode_start=args.episode_start,
+                 episode_end=args.episode_end,
+                 force_replay=args.force_replay,
++                allow_legacy_uniform_resample=args.allow_legacy_uniform_resample,
+                 skip_existing=args.skip_existing,
+                 parallel_workers=args.parallel_workers,
+                 gpu_ids=gpu_ids,
+@@ -1360,6 +1470,7 @@ def main() -> None:
+                     episode_start=args.episode_start,
+                     episode_end=args.episode_end,
+                     force_replay=args.force_replay,
++                    allow_legacy_uniform_resample=args.allow_legacy_uniform_resample,
+                     skip_existing=args.skip_existing,
+                     gpu_error_retries=args.gpu_error_retries,
+                     clear_cache_freq=args.clear_cache_freq,
+diff --git a/script/interception_hdf5.py b/script/interception_hdf5.py
+new file mode 100644
+index 0000000..84333d8
+--- /dev/null
++++ b/script/interception_hdf5.py
+@@ -0,0 +1,346 @@
++"""Read and validate DOMINO frame-synchronous interception HDF5 records."""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Dict, Optional
++
++import h5py
++import numpy as np
++
++
++INTERCEPTION_SCHEMA_VERSION = 2
++INTERCEPTION_FIELDS = (
++    "schema_version",
++    "frame_index",
++    "sim_step_index",
++    "sim_time_seconds",
++    "sim_timestep_seconds",
++    "motion_start_sim_step_index",
++    "motion_start_sim_time_seconds",
++    "planned_intercept_sim_time_seconds",
++    "planned_intercept_position",
++    "target_pose_wxyz",
++    "target_contact_poses_wxyz",
++    "ee_poses_wxyz",
++    "camera_poses_wxyz",
++    "gripper_positions",
++    "target_gripper_contact_mask",
++    "target_gripper_contact_centroids_world",
++    "target_gripper_contact_point_counts",
++    "first_target_gripper_contact_valid",
++    "first_target_gripper_contact_step_index",
++    "first_target_gripper_contact_time_seconds",
++    "first_target_gripper_contact_centroids_world",
++    "first_target_gripper_contact_point_counts",
++    "first_target_gripper_contact_ee_poses_wxyz",
++    "first_target_gripper_contact_target_poses_wxyz",
++    "stable_grasp_succeeded",
++)
++
++_IDENTITY_POSE = np.asarray([0, 0, 0, 1, 0, 0, 0], dtype=np.float64)
++
++
++def _require_shape(value: np.ndarray, shape: tuple[Optional[int], ...], field: str) -> None:
++    if value.ndim != len(shape):
++        raise ValueError(f"{field} must have rank {len(shape)}, got {value.shape}")
++    for axis, expected in enumerate(shape):
++        if expected is not None and int(value.shape[axis]) != int(expected):
++            raise ValueError(f"{field} must have shape {shape}, got {value.shape}")
++
++
++def _require_unit_quaternions(value: np.ndarray, field: str) -> None:
++    if value.size == 0:
++        return
++    norms = np.linalg.norm(value[..., 3:7].astype(np.float64), axis=-1)
++    if not np.isfinite(norms).all() or not np.allclose(norms, 1.0, atol=1e-3, rtol=1e-3):
++        raise ValueError(
++            f"{field} contains invalid wxyz quaternion norms "
++            f"[{float(np.min(norms)):.6g}, {float(np.max(norms)):.6g}]"
++        )
++
++
++def _validate_first_contact_latches(
++    payload: Dict[str, np.ndarray],
++    *,
++    sim_steps: np.ndarray,
++    sim_times: np.ndarray,
++    source: str,
++) -> None:
++    valid = payload["first_target_gripper_contact_valid"].astype(bool, copy=False)
++    event_steps = payload["first_target_gripper_contact_step_index"].astype(
++        np.int64, copy=False
++    )
++    event_times = payload["first_target_gripper_contact_time_seconds"].astype(
++        np.float64, copy=False
++    )
++    event_centroids = payload[
++        "first_target_gripper_contact_centroids_world"
++    ].astype(np.float64, copy=False)
++    event_counts = payload["first_target_gripper_contact_point_counts"].astype(
++        np.int64, copy=False
++    )
++    event_ee_poses = payload[
++        "first_target_gripper_contact_ee_poses_wxyz"
++    ].astype(np.float64, copy=False)
++    event_target_poses = payload[
++        "first_target_gripper_contact_target_poses_wxyz"
++    ].astype(np.float64, copy=False)
++
++    for arm_index, arm_name in enumerate(("left", "right")):
++        arm_valid = valid[:, arm_index]
++        if np.any(np.diff(arm_valid.astype(np.int8)) < 0):
++            raise ValueError(
++                f"{source}: {arm_name} first-contact validity is not monotonic"
++            )
++
++        invalid = ~arm_valid
++        if np.any(event_steps[invalid, arm_index] != -1):
++            raise ValueError(
++                f"{source}: {arm_name} invalid first-contact steps must be -1"
++            )
++        if np.any(event_times[invalid, arm_index] != -1.0):
++            raise ValueError(
++                f"{source}: {arm_name} invalid first-contact times must be -1.0"
++            )
++        if np.any(event_counts[invalid, arm_index] != 0):
++            raise ValueError(
++                f"{source}: {arm_name} invalid first-contact point counts must be zero"
++            )
++        if invalid.any() and not np.allclose(
++            event_centroids[invalid, arm_index], 0.0, atol=1e-12, rtol=0
++        ):
++            raise ValueError(
++                f"{source}: {arm_name} invalid first-contact centroids must be zero"
++            )
++        if invalid.any():
++            invalid_ee = event_ee_poses[invalid, arm_index]
++            invalid_target = event_target_poses[invalid, arm_index]
++            if not np.allclose(invalid_ee, _IDENTITY_POSE, atol=1e-12, rtol=0):
++                raise ValueError(
++                    f"{source}: {arm_name} invalid first-contact EE poses must be identity"
++                )
++            if not np.allclose(invalid_target, _IDENTITY_POSE, atol=1e-12, rtol=0):
++                raise ValueError(
++                    f"{source}: {arm_name} invalid first-contact target poses must be identity"
++                )
++
++        valid_indices = np.flatnonzero(arm_valid)
++        if valid_indices.size == 0:
++            continue
++        first_index = int(valid_indices[0])
++        valid_steps = event_steps[first_index:, arm_index]
++        valid_times = event_times[first_index:, arm_index]
++        valid_centroids = event_centroids[first_index:, arm_index]
++        valid_counts = event_counts[first_index:, arm_index]
++        valid_ee = event_ee_poses[first_index:, arm_index]
++        valid_target = event_target_poses[first_index:, arm_index]
++        if valid_steps[0] < 0 or valid_times[0] < 0:
++            raise ValueError(
++                f"{source}: {arm_name} valid first-contact event has a negative step/time"
++            )
++        if valid_counts[0] <= 0:
++            raise ValueError(
++                f"{source}: {arm_name} valid first-contact event has no contact points"
++            )
++        if not np.all(valid_steps == valid_steps[0]):
++            raise ValueError(
++                f"{source}: {arm_name} first-contact step changes after being latched"
++            )
++        if not np.allclose(valid_times, valid_times[0], atol=1e-12, rtol=0):
++            raise ValueError(
++                f"{source}: {arm_name} first-contact time changes after being latched"
++            )
++        if not np.all(valid_counts == valid_counts[0]):
++            raise ValueError(
++                f"{source}: {arm_name} first-contact point count changes after being latched"
++            )
++        if not np.allclose(valid_centroids, valid_centroids[0], atol=1e-12, rtol=0):
++            raise ValueError(
++                f"{source}: {arm_name} first-contact centroid changes after being latched"
++            )
++        if not np.allclose(valid_ee, valid_ee[0], atol=1e-12, rtol=0):
++            raise ValueError(
++                f"{source}: {arm_name} first-contact EE pose changes after being latched"
++            )
++        if not np.allclose(valid_target, valid_target[0], atol=1e-12, rtol=0):
++            raise ValueError(
++                f"{source}: {arm_name} first-contact target pose changes after being latched"
++            )
++        if np.any(valid_steps > sim_steps[first_index:]):
++            raise ValueError(
++                f"{source}: {arm_name} first-contact step is later than its saved frame"
++            )
++        if np.any(valid_times > sim_times[first_index:] + 1e-12):
++            raise ValueError(
++                f"{source}: {arm_name} first-contact time is later than its saved frame"
++            )
++
++
++def load_frame_synchronous_interception(
++    hdf5_path: str | Path,
++    *,
++    expected_frames: Optional[int] = None,
++    required: bool = True,
++) -> Optional[Dict[str, np.ndarray]]:
++    path = Path(hdf5_path)
++    with h5py.File(path, "r") as handle:
++        if "interception" not in handle:
++            if required:
++                raise ValueError(
++                    f"{path} has no frame-synchronous interception group; "
++                    "recollect the episode or explicitly allow legacy uniform resampling"
++                )
++            return None
++        group = handle["interception"]
++        missing = [field for field in INTERCEPTION_FIELDS if field not in group]
++        if missing:
++            raise ValueError(f"{path}:interception is missing fields: {missing}")
++        payload = {field: np.asarray(group[field][()]) for field in INTERCEPTION_FIELDS}
++
++    target_pose = payload["target_pose_wxyz"].astype(np.float64, copy=False)
++    _require_shape(target_pose, (None, 7), "target_pose_wxyz")
++    frame_count = int(target_pose.shape[0])
++    if frame_count <= 0:
++        raise ValueError(f"{path}:interception contains no frames")
++    if expected_frames is not None and frame_count != int(expected_frames):
++        raise ValueError(
++            f"{path}:interception has {frame_count} frames, expected {int(expected_frames)}"
++        )
++
++    for field in (
++        "schema_version",
++        "frame_index",
++        "sim_step_index",
++        "sim_time_seconds",
++        "sim_timestep_seconds",
++        "motion_start_sim_step_index",
++        "motion_start_sim_time_seconds",
++        "planned_intercept_sim_time_seconds",
++        "stable_grasp_succeeded",
++    ):
++        _require_shape(payload[field], (frame_count,), field)
++    _require_shape(payload["planned_intercept_position"], (frame_count, 3), "planned_intercept_position")
++    _require_shape(payload["target_contact_poses_wxyz"], (frame_count, None, 7), "target_contact_poses_wxyz")
++    _require_shape(payload["ee_poses_wxyz"], (frame_count, 2, 7), "ee_poses_wxyz")
++    _require_shape(payload["camera_poses_wxyz"], (frame_count, 3, 7), "camera_poses_wxyz")
++    _require_shape(payload["gripper_positions"], (frame_count, 2), "gripper_positions")
++    _require_shape(payload["target_gripper_contact_mask"], (frame_count, 2), "target_gripper_contact_mask")
++    _require_shape(payload["target_gripper_contact_centroids_world"], (frame_count, 2, 3), "target_gripper_contact_centroids_world")
++    _require_shape(payload["target_gripper_contact_point_counts"], (frame_count, 2), "target_gripper_contact_point_counts")
++    _require_shape(payload["first_target_gripper_contact_valid"], (frame_count, 2), "first_target_gripper_contact_valid")
++    _require_shape(payload["first_target_gripper_contact_step_index"], (frame_count, 2), "first_target_gripper_contact_step_index")
++    _require_shape(payload["first_target_gripper_contact_time_seconds"], (frame_count, 2), "first_target_gripper_contact_time_seconds")
++    _require_shape(payload["first_target_gripper_contact_centroids_world"], (frame_count, 2, 3), "first_target_gripper_contact_centroids_world")
++    _require_shape(payload["first_target_gripper_contact_point_counts"], (frame_count, 2), "first_target_gripper_contact_point_counts")
++    _require_shape(payload["first_target_gripper_contact_ee_poses_wxyz"], (frame_count, 2, 7), "first_target_gripper_contact_ee_poses_wxyz")
++    _require_shape(payload["first_target_gripper_contact_target_poses_wxyz"], (frame_count, 2, 7), "first_target_gripper_contact_target_poses_wxyz")
++
++    if not np.all(payload["schema_version"].astype(np.int64) == INTERCEPTION_SCHEMA_VERSION):
++        raise ValueError(f"{path}:interception has an unsupported schema version")
++    if not np.array_equal(payload["frame_index"].astype(np.int64), np.arange(frame_count)):
++        raise ValueError(f"{path}:interception frame_index is not contiguous 0..{frame_count - 1}")
++    sim_steps = payload["sim_step_index"].astype(np.int64)
++    sim_times = payload["sim_time_seconds"].astype(np.float64)
++    if np.any(np.diff(sim_steps) < 0):
++        raise ValueError(f"{path}:interception sim_step_index is not monotonic")
++    if np.any(np.diff(sim_times) < -1e-12):
++        raise ValueError(f"{path}:interception sim_time_seconds is not monotonic")
++    if np.any(payload["sim_timestep_seconds"].astype(np.float64) <= 0):
++        raise ValueError(f"{path}:interception has non-positive simulator timesteps")
++
++    for field in (
++        "sim_time_seconds",
++        "sim_timestep_seconds",
++        "motion_start_sim_time_seconds",
++        "planned_intercept_sim_time_seconds",
++        "planned_intercept_position",
++        "target_pose_wxyz",
++        "target_contact_poses_wxyz",
++        "ee_poses_wxyz",
++        "camera_poses_wxyz",
++        "gripper_positions",
++        "target_gripper_contact_centroids_world",
++        "first_target_gripper_contact_time_seconds",
++        "first_target_gripper_contact_centroids_world",
++        "first_target_gripper_contact_ee_poses_wxyz",
++        "first_target_gripper_contact_target_poses_wxyz",
++    ):
++        if not np.isfinite(payload[field]).all():
++            raise ValueError(f"{path}:interception field {field} contains non-finite values")
++    for field in (
++        "motion_start_sim_step_index",
++        "motion_start_sim_time_seconds",
++        "planned_intercept_sim_time_seconds",
++        "planned_intercept_position",
++    ):
++        if not np.allclose(payload[field], payload[field][0], atol=1e-10, rtol=1e-10):
++            raise ValueError(f"{path}:interception field {field} changes within the episode")
++
++    _require_unit_quaternions(target_pose, "target_pose_wxyz")
++    _require_unit_quaternions(payload["target_contact_poses_wxyz"], "target_contact_poses_wxyz")
++    _require_unit_quaternions(payload["ee_poses_wxyz"], "ee_poses_wxyz")
++    _require_unit_quaternions(payload["camera_poses_wxyz"], "camera_poses_wxyz")
++    _require_unit_quaternions(
++        payload["first_target_gripper_contact_ee_poses_wxyz"],
++        "first_target_gripper_contact_ee_poses_wxyz",
++    )
++    _require_unit_quaternions(
++        payload["first_target_gripper_contact_target_poses_wxyz"],
++        "first_target_gripper_contact_target_poses_wxyz",
++    )
++
++    contact_mask = payload["target_gripper_contact_mask"].astype(bool, copy=False)
++    contact_valid = payload["first_target_gripper_contact_valid"].astype(bool, copy=False)
++    contact_centroids = payload["target_gripper_contact_centroids_world"].astype(
++        np.float64, copy=False
++    )
++    contact_counts = payload["target_gripper_contact_point_counts"].astype(
++        np.int64, copy=False
++    )
++    if np.any(contact_counts < 0):
++        raise ValueError(f"{path}:interception has negative contact-point counts")
++    if not np.array_equal(contact_mask, contact_counts > 0):
++        raise ValueError(
++            f"{path}:interception contact mask does not match contact-point counts"
++        )
++    if np.any(~contact_mask) and not np.allclose(
++        contact_centroids[~contact_mask], 0.0, atol=1e-12, rtol=0
++    ):
++        raise ValueError(
++            f"{path}:interception invalid instantaneous contact centroids must be zero"
++        )
++    if np.any(contact_mask & ~contact_valid):
++        raise ValueError(
++            f"{path}:interception instantaneous contact exists without a latched first contact"
++        )
++    _validate_first_contact_latches(
++        payload,
++        sim_steps=sim_steps,
++        sim_times=sim_times,
++        source=f"{path}:interception",
++    )
++    stable_grasp = payload["stable_grasp_succeeded"].astype(bool, copy=False)
++    if np.any(np.diff(stable_grasp.astype(np.int8)) < 0):
++        raise ValueError(f"{path}:interception stable_grasp_succeeded is not monotonic")
++
++    payload["schema_version"] = payload["schema_version"].astype(np.int64, copy=False)
++    payload["frame_index"] = payload["frame_index"].astype(np.int64, copy=False)
++    payload["sim_step_index"] = sim_steps
++    payload["sim_time_seconds"] = sim_times
++    payload["target_pose_wxyz"] = target_pose
++    payload["target_gripper_contact_mask"] = contact_mask
++    payload["target_gripper_contact_centroids_world"] = contact_centroids
++    payload["target_gripper_contact_point_counts"] = contact_counts
++    payload["first_target_gripper_contact_valid"] = contact_valid
++    payload["first_target_gripper_contact_step_index"] = payload[
++        "first_target_gripper_contact_step_index"
++    ].astype(np.int64, copy=False)
++    payload["first_target_gripper_contact_time_seconds"] = payload[
++        "first_target_gripper_contact_time_seconds"
++    ].astype(np.float64, copy=False)
++    payload["first_target_gripper_contact_point_counts"] = payload[
++        "first_target_gripper_contact_point_counts"
++    ].astype(np.int64, copy=False)
++    payload["stable_grasp_succeeded"] = stable_grasp
++    return payload
+diff --git a/script/tests/__init__.py b/script/tests/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/script/tests/test_config_overrides.py b/script/tests/test_config_overrides.py
+new file mode 100644
+index 0000000..8a2098a
+--- /dev/null
++++ b/script/tests/test_config_overrides.py
+@@ -0,0 +1,47 @@
++from __future__ import annotations
++
++import unittest
++
++from script.config_overrides import parse_override_pairs
++
++
++class TestConfigOverrides(unittest.TestCase):
++    def test_json_values_preserve_types_including_string_lookalikes(self):
++        parsed = parse_override_pairs(
++            [
++                "--enabled",
++                "false",
++                "--label",
++                '"false"',
++                "--dims",
++                "[6,13]",
++                "--threshold",
++                "0.15",
++                "--nothing",
++                "null",
++            ]
++        )
++        self.assertIs(parsed["enabled"], False)
++        self.assertEqual(parsed["label"], "false")
++        self.assertEqual(parsed["dims"], [6, 13])
++        self.assertEqual(parsed["threshold"], 0.15)
++        self.assertIsNone(parsed["nothing"])
++
++    def test_python_expression_is_data_not_executed(self):
++        expression = "__import__('os').system('false')"
++        self.assertEqual(
++            parse_override_pairs(["--value", expression]),
++            {"value": expression},
++        )
++
++    def test_malformed_or_duplicate_pairs_are_rejected(self):
++        with self.assertRaisesRegex(ValueError, "pairs"):
++            parse_override_pairs(["--one"])
++        with self.assertRaisesRegex(ValueError, "duplicate"):
++            parse_override_pairs(["--one", "1", "--one", "2"])
++        with self.assertRaisesRegex(ValueError, "start"):
++            parse_override_pairs(["one", "1"])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/script/tests/test_episode_instruction_paths.py b/script/tests/test_episode_instruction_paths.py
+new file mode 100644
+index 0000000..088cc69
+--- /dev/null
++++ b/script/tests/test_episode_instruction_paths.py
+@@ -0,0 +1,73 @@
++from __future__ import annotations
++
++import importlib.util
++import json
++from pathlib import Path
++import tempfile
++import unittest
++
++
++MODULE_PATH = (
++    Path(__file__).resolve().parents[2]
++    / "description"
++    / "utils"
++    / "generate_episode_instructions.py"
++)
++SPEC = importlib.util.spec_from_file_location(
++    "generate_episode_instructions",
++    MODULE_PATH,
++)
++assert SPEC is not None and SPEC.loader is not None
++instructions = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(instructions)
++
++
++class TestEpisodeInstructionPaths(unittest.TestCase):
++    def test_save_uses_configured_collection_root(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            instructions.save_episode_descriptions(
++                "adjust_bottle",
++                "interception_v2_smoke",
++                [
++                    {
++                        "episode_index": 0,
++                        "seen": ["Lift the bottle upright."],
++                        "unseen": [],
++                    }
++                ],
++                str(root),
++            )
++            output = (
++                root
++                / "adjust_bottle"
++                / "interception_v2_smoke"
++                / "instructions"
++                / "episode0.json"
++            )
++            self.assertTrue(output.is_file())
++            self.assertEqual(
++                json.loads(output.read_text(encoding="utf-8"))["seen"],
++                ["Lift the bottle upright."],
++            )
++
++    def test_load_uses_same_configured_collection_root(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            scene_dir = root / "adjust_bottle" / "interception_v2_smoke"
++            scene_dir.mkdir(parents=True)
++            expected = {"episode_0": {"info": {"{A}": "bottle"}}}
++            (scene_dir / "scene_info.json").write_text(
++                json.dumps(expected),
++                encoding="utf-8",
++            )
++            actual = instructions.load_scene_info(
++                "adjust_bottle",
++                "interception_v2_smoke",
++                str(root),
++            )
++            self.assertEqual(actual, expected)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/script/tests/test_frame_sync.py b/script/tests/test_frame_sync.py
+new file mode 100644
+index 0000000..d1a5820
+--- /dev/null
++++ b/script/tests/test_frame_sync.py
+@@ -0,0 +1,60 @@
++from __future__ import annotations
++
++from pathlib import Path
++import sys
++import unittest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "envs" / "utils"))
++
++from frame_sync import SceneStepClock  # noqa: E402
++
++
++class FakeScene:
++    def __init__(self):
++        self.calls = 0
++        self.timestep = 0.01
++
++    def step(self):
++        self.calls += 1
++
++    def get_timestep(self):
++        return self.timestep
++
++
++class TestSceneStepClock(unittest.TestCase):
++    def test_counts_all_wrapped_scene_steps_and_accumulates_time(self) -> None:
++        scene = FakeScene()
++        clock = SceneStepClock(scene)
++        clock.install()
++        scene.step()
++        scene.step()
++        scene.timestep = 0.02
++        scene.step()
++        snapshot = clock.snapshot()
++        self.assertEqual(scene.calls, 3)
++        self.assertEqual(snapshot.step_index, 3)
++        self.assertAlmostEqual(snapshot.time_seconds, 0.04)
++        self.assertAlmostEqual(snapshot.timestep_seconds, 0.02)
++
++    def test_composes_with_a_temporary_outer_step_wrapper(self) -> None:
++        scene = FakeScene()
++        clock = SceneStepClock(scene)
++        clock.install()
++        clock_step = scene.step
++        outer_count = 0
++
++        def outer_step():
++            nonlocal outer_count
++            outer_count += 1
++            clock_step()
++
++        scene.step = outer_step
++        scene.step()
++        scene.step = clock_step
++        scene.step()
++        self.assertEqual(outer_count, 1)
++        self.assertEqual(clock.snapshot().step_index, 2)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/script/tests/test_interception_hdf5.py b/script/tests/test_interception_hdf5.py
+new file mode 100644
+index 0000000..b652a46
+--- /dev/null
++++ b/script/tests/test_interception_hdf5.py
+@@ -0,0 +1,125 @@
++from __future__ import annotations
++
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++
++import h5py
++import numpy as np
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++from interception_hdf5 import (  # noqa: E402
++    INTERCEPTION_FIELDS,
++    load_frame_synchronous_interception,
++)
++
++
++def payload(frame_count: int = 4):
++    identity = np.array([0, 0, 0, 1, 0, 0, 0], dtype=np.float64)
++    if frame_count < 3:
++        raise ValueError("test payload requires at least three frames")
++    event_valid = np.zeros((frame_count, 2), dtype=bool)
++    event_valid[2:, 0] = True
++    event_steps = np.full((frame_count, 2), -1, dtype=np.int64)
++    event_steps[2:, 0] = 18
++    event_times = np.full((frame_count, 2), -1.0, dtype=np.float64)
++    event_times[2:, 0] = 1.08
++    event_centroids = np.zeros((frame_count, 2, 3), dtype=np.float64)
++    event_centroids[2:, 0] = [0.1, 0.2, 0.3]
++    event_counts = np.zeros((frame_count, 2), dtype=np.int64)
++    event_counts[2:, 0] = 2
++    event_ee = np.tile(identity, (frame_count, 2, 1))
++    event_ee[2:, 0, 0] = 0.1
++    event_target = np.tile(identity, (frame_count, 2, 1))
++    event_target[2:, 0, 1] = 0.2
++    contact_mask = np.zeros((frame_count, 2), dtype=bool)
++    contact_mask[2, 0] = True
++    contact_centroids = np.zeros((frame_count, 2, 3), dtype=np.float64)
++    contact_centroids[2, 0] = [0.1, 0.2, 0.3]
++    contact_counts = np.zeros((frame_count, 2), dtype=np.int64)
++    contact_counts[2, 0] = 2
++    return {
++        "schema_version": np.full(frame_count, 2, dtype=np.int64),
++        "frame_index": np.arange(frame_count, dtype=np.int64),
++        "sim_step_index": np.arange(frame_count, dtype=np.int64) * 4 + 10,
++        "sim_time_seconds": np.arange(frame_count, dtype=np.float64) * 0.04 + 1.0,
++        "sim_timestep_seconds": np.full(frame_count, 0.01, dtype=np.float64),
++        "motion_start_sim_step_index": np.full(frame_count, 10, dtype=np.int64),
++        "motion_start_sim_time_seconds": np.full(frame_count, 1.0, dtype=np.float64),
++        "planned_intercept_sim_time_seconds": np.full(frame_count, 1.2, dtype=np.float64),
++        "planned_intercept_position": np.tile([0.1, 0.2, 0.3], (frame_count, 1)),
++        "target_pose_wxyz": np.tile(identity, (frame_count, 1)),
++        "target_contact_poses_wxyz": np.tile(identity, (frame_count, 2, 1)),
++        "ee_poses_wxyz": np.tile(identity, (frame_count, 2, 1)),
++        "camera_poses_wxyz": np.tile(identity, (frame_count, 3, 1)),
++        "gripper_positions": np.zeros((frame_count, 2), dtype=np.float64),
++        "target_gripper_contact_mask": contact_mask,
++        "target_gripper_contact_centroids_world": contact_centroids,
++        "target_gripper_contact_point_counts": contact_counts,
++        "first_target_gripper_contact_valid": event_valid,
++        "first_target_gripper_contact_step_index": event_steps,
++        "first_target_gripper_contact_time_seconds": event_times,
++        "first_target_gripper_contact_centroids_world": event_centroids,
++        "first_target_gripper_contact_point_counts": event_counts,
++        "first_target_gripper_contact_ee_poses_wxyz": event_ee,
++        "first_target_gripper_contact_target_poses_wxyz": event_target,
++        "stable_grasp_succeeded": np.arange(frame_count) == frame_count - 1,
++    }
++
++
++class TestInterceptionHdf5(unittest.TestCase):
++    def _write(self, root: Path, values) -> Path:
++        path = root / "episode0.hdf5"
++        with h5py.File(path, "w") as handle:
++            group = handle.create_group("interception")
++            for field in INTERCEPTION_FIELDS:
++                group.create_dataset(field, data=values[field])
++        return path
++
++    def test_loads_valid_exact_frame_metadata(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            path = self._write(Path(tmp), payload())
++            result = load_frame_synchronous_interception(path, expected_frames=4)
++        self.assertIsNotNone(result)
++        self.assertEqual(result["target_contact_poses_wxyz"].shape, (4, 2, 7))
++
++    def test_rejects_timestamp_regression(self) -> None:
++        values = payload()
++        values["sim_time_seconds"][2] = 0.5
++        with tempfile.TemporaryDirectory() as tmp:
++            path = self._write(Path(tmp), values)
++            with self.assertRaisesRegex(ValueError, "not monotonic"):
++                load_frame_synchronous_interception(path)
++
++    def test_rejects_first_contact_latch_regression(self) -> None:
++        values = payload()
++        values["first_target_gripper_contact_valid"][3, 0] = False
++        with tempfile.TemporaryDirectory() as tmp:
++            path = self._write(Path(tmp), values)
++            with self.assertRaisesRegex(ValueError, "validity is not monotonic"):
++                load_frame_synchronous_interception(path)
++
++    def test_rejects_first_contact_from_future_frame(self) -> None:
++        values = payload()
++        values["first_target_gripper_contact_step_index"][2:, 0] = 21
++        with tempfile.TemporaryDirectory() as tmp:
++            path = self._write(Path(tmp), values)
++            with self.assertRaisesRegex(ValueError, "later than its saved frame"):
++                load_frame_synchronous_interception(path)
++
++    def test_missing_group_is_only_allowed_explicitly(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / "episode0.hdf5"
++            with h5py.File(path, "w"):
++                pass
++            self.assertIsNone(
++                load_frame_synchronous_interception(path, required=False)
++            )
++            with self.assertRaisesRegex(ValueError, "recollect"):
++                load_frame_synchronous_interception(path, required=True)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/script/tests/test_pkl2hdf5_contract.py b/script/tests/test_pkl2hdf5_contract.py
+new file mode 100644
+index 0000000..7a69233
+--- /dev/null
++++ b/script/tests/test_pkl2hdf5_contract.py
+@@ -0,0 +1,146 @@
++from __future__ import annotations
++
++import importlib.util
++from pathlib import Path
++import pickle
++import sys
++import tempfile
++import types
++import unittest
++
++import h5py
++import numpy as np
++
++
++def load_module():
++    module_path = Path(__file__).resolve().parents[2] / "envs" / "utils" / "pkl2hdf5.py"
++    package_name = "pkl2hdf5_contract_testpkg"
++    package = types.ModuleType(package_name)
++    package.__path__ = [str(module_path.parent)]
++    sys.modules[package_name] = package
++
++    video_module = types.ModuleType(f"{package_name}.images_to_video")
++
++    def images_to_video(_images, out_path):
++        Path(out_path).write_bytes(b"test-video")
++
++    video_module.images_to_video = images_to_video
++    sys.modules[video_module.__name__] = video_module
++    spec = importlib.util.spec_from_file_location(
++        f"{package_name}.pkl2hdf5",
++        module_path,
++    )
++    assert spec is not None and spec.loader is not None
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[spec.name] = module
++    spec.loader.exec_module(module)
++    return module
++
++
++PKL2HDF5 = load_module()
++
++
++def interception_frame(frame_index: int) -> dict:
++    identity = np.asarray([0, 0, 0, 1, 0, 0, 0], dtype=np.float64)
++    return {
++        "schema_version": np.int64(2),
++        "frame_index": np.int64(frame_index),
++        "sim_step_index": np.int64(frame_index * 3),
++        "sim_time_seconds": np.float64(frame_index * 0.03),
++        "sim_timestep_seconds": np.float64(0.01),
++        "motion_start_sim_step_index": np.int64(0),
++        "motion_start_sim_time_seconds": np.float64(0.0),
++        "planned_intercept_sim_time_seconds": np.float64(0.2),
++        "planned_intercept_position": np.asarray([0.1, 0.2, 0.3], dtype=np.float64),
++        "target_pose_wxyz": identity.copy(),
++        "target_contact_poses_wxyz": identity[None].copy(),
++        "ee_poses_wxyz": np.tile(identity, (2, 1)),
++        "camera_poses_wxyz": np.tile(identity, (3, 1)),
++        "gripper_positions": np.zeros(2, dtype=np.float64),
++        "target_gripper_contact_mask": np.zeros(2, dtype=bool),
++        "target_gripper_contact_centroids_world": np.zeros((2, 3), dtype=np.float64),
++        "target_gripper_contact_point_counts": np.zeros(2, dtype=np.int64),
++        "first_target_gripper_contact_valid": np.zeros(2, dtype=bool),
++        "first_target_gripper_contact_step_index": np.full(2, -1, dtype=np.int64),
++        "first_target_gripper_contact_time_seconds": np.full(2, -1.0, dtype=np.float64),
++        "first_target_gripper_contact_centroids_world": np.zeros((2, 3), dtype=np.float64),
++        "first_target_gripper_contact_point_counts": np.zeros(2, dtype=np.int64),
++        "first_target_gripper_contact_ee_poses_wxyz": np.tile(identity, (2, 1)),
++        "first_target_gripper_contact_target_poses_wxyz": np.tile(identity, (2, 1)),
++        "stable_grasp_succeeded": np.bool_(False),
++    }
++
++
++class TestPklToHdf5Contract(unittest.TestCase):
++    def test_missing_frame_field_fails_immediately(self) -> None:
++        structure = {"a": [], "nested": {"b": []}}
++        with self.assertRaisesRegex(KeyError, "nested/b"):
++            PKL2HDF5.append_data_to_structure(
++                structure,
++                {"a": np.array([1]), "nested": {}},
++            )
++
++    def test_serializes_equal_length_interception_fields_atomically(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            pkl_paths = []
++            for frame_index in range(2):
++                frame = {
++                    "observation": {
++                        "head_camera": {
++                            "rgb": np.zeros((4, 4, 3), dtype=np.uint8),
++                        }
++                    },
++                    "interception": {
++                        **interception_frame(frame_index),
++                    },
++                }
++                pkl_path = root / f"{frame_index}.pkl"
++                with pkl_path.open("wb") as handle:
++                    pickle.dump(frame, handle)
++                pkl_paths.append(str(pkl_path))
++
++            hdf5_path = root / "episode0.hdf5"
++            video_path = root / "episode0.mp4"
++            PKL2HDF5.pkl_files_to_hdf5_and_video(
++                pkl_paths,
++                hdf5_path,
++                video_path,
++            )
++
++            with h5py.File(hdf5_path, "r") as handle:
++                self.assertEqual(handle["interception/frame_index"].shape, (2,))
++                self.assertEqual(
++                    handle["interception/target_pose_wxyz"].shape,
++                    (2, 7),
++                )
++            self.assertTrue(video_path.exists())
++            self.assertFalse(list(root.glob("*.tmp.*")))
++
++    def test_rejects_legacy_interception_schema(self) -> None:
++        frames = [interception_frame(0), interception_frame(1)]
++        frames[0]["schema_version"] = np.int64(1)
++        structure = {"interception": {key: [] for key in frames[0]}}
++        for frame in frames:
++            PKL2HDF5.append_data_to_structure(
++                structure,
++                {"interception": frame},
++            )
++        with self.assertRaisesRegex(ValueError, "Unsupported interception schema"):
++            PKL2HDF5.validate_interception_frames(structure, 2)
++
++    def test_hdf5_jpeg_preserves_rgb_color_semantics(self) -> None:
++        rgb_red = np.zeros((16, 16, 3), dtype=np.uint8)
++        rgb_red[..., 0] = 255
++        encoded, _max_len = PKL2HDF5.images_encoding([rgb_red], is_rgb=True)
++        decoded_bgr = PKL2HDF5.cv2.imdecode(
++            np.frombuffer(encoded[0], dtype=np.uint8),
++            PKL2HDF5.cv2.IMREAD_COLOR,
++        )
++        center = decoded_bgr[8, 8]
++        self.assertGreater(int(center[2]), 240)
++        self.assertLess(int(center[0]), 15)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/task_config/_config_template.yml b/task_config/_config_template.yml
+index de2ddc5..efaea0f 100644
+--- a/task_config/_config_template.yml
++++ b/task_config/_config_template.yml
+@@ -25,6 +25,7 @@ data_type:
+   pointcloud: false
+   endpose: true
+   qpos: true
++  interception: false
+   mesh_segmentation: false
+   actor_segmentation: false
+ pcd_down_sample_num: 1024
+diff --git a/task_config/demo_clean_dynamic.yml b/task_config/demo_clean_dynamic.yml
+index b5ca01b..030d44a 100644
+--- a/task_config/demo_clean_dynamic.yml
++++ b/task_config/demo_clean_dynamic.yml
+@@ -28,6 +28,7 @@ data_type:
+   observer: false
+   endpose: true
+   qpos: true
++  interception: true
+   mesh_segmentation: false
+   actor_segmentation: false
+ pcd_down_sample_num: 1024
+diff --git a/task_config/demo_random_dynamic.yml b/task_config/demo_random_dynamic.yml
+index 9a12534..b98a690 100644
+--- a/task_config/demo_random_dynamic.yml
++++ b/task_config/demo_random_dynamic.yml
+@@ -28,6 +28,7 @@ data_type:
+   observer: false
+   endpose: true
+   qpos: true
++  interception: true
+   mesh_segmentation: false
+   actor_segmentation: false
+ pcd_down_sample_num: 1024
+@@ -36,4 +37,4 @@ save_path: ./data
+ clear_cache_freq: 5
+ collect_data: true
+ eval_video_log: true
+-check_render_success: true  # whether to check render success
+\ No newline at end of file
++check_render_success: true  # whether to check render success
+diff --git a/task_config/interception_v2_smoke.yml b/task_config/interception_v2_smoke.yml
+new file mode 100644
+index 0000000..5e91bca
+--- /dev/null
++++ b/task_config/interception_v2_smoke.yml
+@@ -0,0 +1,44 @@
++# One-episode remote-only schema-v2 capture gate.
++render_freq: 0
++episode_num: 1
++use_seed: false
++save_freq: 15
++embodiment: [aloha-agilex]
++language_num: 1
++use_dynamic: true
++dynamic_level: 1
++dynamic_coefficient: 0.1
++domain_randomization:
++  random_background: false
++  cluttered_table: false
++  clean_background_rate: 1
++  random_head_camera_dis: 0
++  random_table_height: 0
++  random_light: false
++  crazy_random_light_rate: 0
++camera:
++  head_camera_type: D435
++  wrist_camera_type: D435
++  collect_head_camera: true
++  collect_wrist_camera: true
++data_type:
++  rgb: true
++  third_view: false
++  depth: false
++  pointcloud: false
++  observer: false
++  endpose: true
++  qpos: true
++  interception: true
++  mesh_segmentation: false
++  actor_segmentation: false
++pcd_down_sample_num: 1024
++pcd_crop: true
++save_path: ./artifacts/interception_v2_smoke_run2
++clear_cache_freq: 1
++collect_data: true
++eval_video_log: false
++check_render_success: false
++max_seed_attempts: 20
++max_regeneration_attempts: 3
++debug_traceback: true

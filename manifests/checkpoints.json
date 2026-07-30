@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "repo_id": "KhalilGao/DynamicWAM",
+  "revision": "925cbb7aef5033c924f809ae87479d39fe9f76ff",
+  "checkpoint_root": "external/checkpoints",
+  "config": {
+    "filename": "absolute_motion_v2.yaml",
+    "hub_path": "configs/absolute_motion_v2.yaml",
+    "sha256": "4dc38bc1aced3cb0ec40a90163ffa59bf26865419ddaeb26ae63bfa8ab3a55be",
+    "size_bytes": 7479
+  },
+  "artifacts": [
+    {
+      "id": "full",
+      "filename": "DynamicWAM_full.pt",
+      "hub_path": "external/checkpoints/DynamicWAM_full.pt",
+      "sha256": "7c0dfc44a785ea1f6bd1f833f09dcadc2e470dadb1ba5508fa98918e147671d7",
+      "size_bytes": 1977857939,
+      "global_step": 40000,
+      "format": "dynamicwam_absolute_motion_checkpoint",
+      "version": 2
+    }
+  ]
+}

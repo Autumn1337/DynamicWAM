@@ -1,0 +1,267 @@
+# DynamicWAM quality-filtered exact-time absolute-motion production profile.
+# Every executable derives its resolved settings from this file and snapshots
+# both the source bytes and resolved configuration into its run directory.
+schema_version: 2
+baseline: absolute_motion_v2
+
+paths:
+  project_root: ..
+  raw_dataset: data/raw
+  source_dataset: data/converted/domino_exact_time
+  packed_dataset: data/packed/domino_absolute_motion_v2
+  head_flow_cache: data/flow_cache/domino_absolute_motion_v2
+  language_embeddings: data/language_embeddings
+  wan_root: external/Wan2.2-TI2V-5B
+  external_assets_manifest: manifests/external_assets.json
+  checkpoint_manifest: manifests/checkpoints.json
+  training_runs: outputs/training
+  collection_logs: outputs/collection
+  pca_artifacts: outputs/stage1_pca
+  stage1_checkpoint: outputs/training/absolute_motion_stage1_video/exports/stage1_step_80000.pt
+  base_checkpoint: external/checkpoints/DynamicWAM_wo_motion.pt
+  base_action_stats: external/checkpoints/DynamicWAM_wo_motion_action_stats.json
+  motion_init_checkpoint: outputs/checkpoint_init/absolute_motion_init.pt
+  stage2_checkpoint: outputs/training/absolute_motion_stage2_action/exports/stage2_step_80000.pt
+  stage3_checkpoint: external/checkpoints/DynamicWAM_full.pt
+  action_stats: external/checkpoints/DynamicWAM_full_action_stats.json
+  evaluation_runs: outputs/evaluation
+
+method:
+  flow_matching:
+    shift: 5.0
+    sigma_min: 0.0
+    extra_one_step: true
+    training_timesteps: 1000
+  observation:
+    head_size: [240, 320]
+    wrist_size: [120, 160]
+  video:
+    num_frames: 8
+    size: [384, 320]
+    future_size: [192, 160]
+    global_downsample_rate: 3
+    video_action_frequency_ratio: 2
+  head_flow:
+    count: 4
+    policy_stride: 4
+    compute_size: [64, 64]
+    container_fps: 30.0
+    normalization_percentile: 99.0
+    farneback:
+      pyr_scale: 0.5
+      levels: 3
+      winsize: 15
+      iterations: 3
+      poly_n: 5
+      poly_sigma: 1.2
+      flags: 0
+    quality:
+      method: forward_backward_consistency_v1
+      relative_error: 0.01
+      absolute_error_squared: 0.5
+      minimum_reliable_fraction: 0.1
+  compact_wan:
+    precision: bfloat16
+    dim: 2048
+    ffn_dim: 8192
+    num_heads: 16
+    num_layers: 12
+    head_dim: 128
+    hidden_anchor_layers: [1, 3, 5, 7, 9, 12]
+    motion_anchor_layers: [6, 8, 10, 12]
+    teacher_layer_mapping: [1, 2, 4, 6, 8, 11, 14, 17, 20, 23, 26, 30]
+  action_expert:
+    dim: 768
+    ffn_dim: 3072
+    num_layers: 12
+    chunk_size: 16
+    state_dim: 14
+    action_dim: 14
+  normalization_epsilon: 1.0e-6
+
+collection:
+  domino_commit: 9b1f34129323957baff35bcbc866fceca7e02779
+  clean_config_name: absolute_motion_clean
+  randomized_config_name: absolute_motion_randomized
+  clean_episodes_per_task: 150
+  randomized_episodes_per_task: 150
+  workers_per_gpu: 2
+  planner_workers_per_task: 2
+  renderer_workers_per_task: 1
+  renderer_recycle_attempts: 16
+  ready_buffer_episodes: 8
+  worker_poll_seconds: 0.25
+  collection_raw_mp4: false
+  converter_workers: 96
+  motion_statistics_workers: 64
+
+initialization:
+  base_checkpoint_sha256: fa88a1f33f2205db5a4534e09bb02d1bee9dea7b2049299ac68932a34de82f03
+  base_action_stats_sha256: 730a91e41b6a23c70cec49cd222835373ba9364680da5753f4408c5534319b04
+  torch_seed: 20260718
+
+data:
+  splits: [clean, randomized]
+  samples_per_episode: 10
+  sampler_seed: 2026
+  language_prompts_per_task: 100
+  language_prompt_seed: 2026
+  max_open_shards: 16
+
+packing:
+  shard_size: 10000
+  language_items_per_shard: 64
+  max_open_shards: 8
+  device: cuda
+  batch_size: 64
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  qpos_cache_size: 8
+  progress_interval_seconds: 2
+  log_level: INFO
+  distributed_timeout_minutes: 240
+
+training:
+  common:
+    device: cuda
+    log_level: INFO
+    per_device_batch_size: 16
+    gradient_accumulation_steps: 1
+    weight_decay: 1.0e-3
+    grad_clip_norm: 1.0
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+    log_interval: 10
+    checkpoint_interval: 40000
+    checkpoint_total_limit: 10
+    resume_from: ""
+  distributed:
+    zero_stage: 0
+    bf16: true
+    steps_per_print: 2000
+  stage1_pca:
+    episodes: 1000
+    subclips_per_episode: 4
+    states_per_subclip: 2
+    max_tokens_per_layer: 200000
+    seed: 2026
+  stage1:
+    allow_tf32: true
+    cudnn_benchmark: true
+    max_steps: 80000
+    learning_rate: 5.0e-5
+    min_lr_ratio: 0.001
+    warmup_steps: 1000
+    projection_dim: 256
+    hidden_teacher_layers: [1, 4, 8, 14, 20, 30]
+    motion_teacher_layers: [11, 17, 23, 30]
+    lambda_gt: 1.0
+    lambda_hidden_schedule: [0.2, 0.1, 0.0]
+    lambda_motion_schedule: [0.2, 0.1, 0.0]
+    schedule_boundaries: [0.35, 0.75, 1.0]
+    timestep_sampler:
+      uniform_weight: 0.25
+      low_center: 0.25
+      low_weight: 1.0
+      mid_center: 0.50
+      mid_weight: 1.25
+      high_center: 0.75
+      high_weight: 0.75
+      width: 0.22
+    sigma_loss_weights:
+      gt:
+        max_sigma: 0.75
+        softness: 0.12
+        floor: 0.25
+      hidden:
+        center: 0.50
+        width: 0.25
+        floor: 0.20
+      motion:
+        center: 0.50
+        width: 0.30
+        floor: 0.20
+  stage2:
+    max_steps: 80000
+    learning_rate: 5.0e-5
+    min_lr_ratio: 1.0e-5
+    warmup_steps: 0
+    action_weight: 1.0
+  stage3:
+    max_steps: 40000
+    action_learning_rate: 5.0e-5
+    video_learning_rate: 1.0e-5
+    min_lr_ratio: 1.0e-5
+    warmup_steps: 0
+    action_weight: 1.0
+    video_weight_initial: 0.01
+    video_weight: 0.001
+    video_weight_anneal_steps: 2000
+
+inference:
+  device: cuda
+  checkpoint_artifact_id: full
+  num_inference_steps: 10
+  video_refresh_steps: [0, 1]
+  action_interval_ms: 100
+  scene_prefix: "The whole scene is in a realistic, industrial art style with three views: a fixed rear camera, a movable left arm camera, and a movable right arm camera. The aloha robot is currently performing the following task: "
+
+benchmark:
+  policy_registration_name: ciwam.adapters.domino.deploy_policy_sync_flow
+  task_config: demo_clean_dynamic
+  instruction_type: unseen
+  checkpoint_label: absolute-motion-v2-stage3-40k-sync-native-exec16-level1
+  dynamic_coefficient: 0.1
+  episodes_per_task: 100
+  start_seed: 100000
+  slot_seed_stride: 100000
+  execute_steps: 16
+  gpus: ["0", "1", "2", "3", "4", "5", "6", "7"]
+  task_timeout_seconds: 86400
+  bootstrap_replicates: 2000
+  bootstrap_seed: 20260714
+  python: external/robotwin/bin/python3.10
+  domino_root: external/DOMINO
+  eval_policy: external/DOMINO/script/eval_policy.py
+  curobo_root: external/curobo/src
+  curobo_extension_sha256: 477ce47d82ac8bf7204d3c542f8a818be3ee4fcd0d18cdae7ec57d17aa920b81
+  tasks:
+    - adjust_bottle
+    - dump_bin_bigbin
+    - grab_roller
+    - handover_block
+    - handover_mic
+    - hanging_mug
+    - move_can_pot
+    - move_playingcard_away
+    - place_a2b_left
+    - place_a2b_right
+    - place_bread_skillet
+    - place_can_basket
+    - place_object_basket
+    - put_bottles_dustbin
+    - put_object_cabinet
+    - rotate_qrcode
+    - scan_object
+    - shake_bottle
+    - shake_bottle_horizontally
+    - beat_block_hammer
+    - click_alarmclock
+    - click_bell
+    - move_pillbottle_pad
+    - move_stapler_pad
+    - place_bread_basket
+    - place_container_plate
+    - place_empty_cup
+    - place_fan
+    - place_mouse_pad
+    - place_object_scale
+    - place_object_stand
+    - place_phone_stand
+    - place_shoe
+    - press_stapler
+    - stamp_seal

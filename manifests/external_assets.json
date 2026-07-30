@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "wan": {
+    "repo_id": "Wan-AI/Wan2.2-TI2V-5B",
+    "repo_type": "model",
+    "revision": "921dbaf3f1674a56f47e83fb80a34bac8a8f203e",
+    "license": "apache-2.0",
+    "root": "external/Wan2.2-TI2V-5B",
+    "files": [
+      {
+        "path": "config.json",
+        "sha256": "d1fea36899d00c2501b836c13ad65af56e2f9529ba622e50886d3f5c3e6c02bc",
+        "size_bytes": 251,
+        "required_for": [
+          "architecture",
+          "inference",
+          "training"
+        ]
+      },
+      {
+        "path": "Wan2.2_VAE.pth",
+        "sha256": "20eb789667fa5e60e7516bf509512f6cb61f01b0aa0695eadaea930c13892b36",
+        "size_bytes": 2818839170,
+        "required_for": [
+          "inference",
+          "packing"
+        ]
+      },
+      {
+        "path": "models_t5_umt5-xxl-enc-bf16.pth",
+        "sha256": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "size_bytes": 11361920418,
+        "required_for": [
+          "inference",
+          "language"
+        ]
+      },
+      {
+        "path": "diffusion_pytorch_model.safetensors.index.json",
+        "sha256": "bfa2337f1163e195d24151a72298daf34a620543898109be47e414c8daa5b3fe",
+        "size_bytes": 72865,
+        "required_for": [
+          "training"
+        ]
+      },
+      {
+        "path": "diffusion_pytorch_model-00001-of-00003.safetensors",
+        "sha256": "720b06c4ade5e87c1246bba8ac95b664c638749cd9b102cf84d823bb44c026a1",
+        "size_bytes": 9825014472,
+        "required_for": [
+          "training"
+        ]
+      },
+      {
+        "path": "diffusion_pytorch_model-00002-of-00003.safetensors",
+        "sha256": "09ec5ef720d8396f6cfa51fbdcbdb2327e37722afd6e89fd38f1e7e5e782c283",
+        "size_bytes": 9995661736,
+        "required_for": [
+          "training"
+        ]
+      },
+      {
+        "path": "diffusion_pytorch_model-00003-of-00003.safetensors",
+        "sha256": "6306f7894c345de9093ad588771c2abfaeb668a81f7a6d9a918bd26ba3568e49",
+        "size_bytes": 178558176,
+        "required_for": [
+          "training"
+        ]
+      },
+      {
+        "path": "google/umt5-xxl/tokenizer_config.json",
+        "sha256": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "size_bytes": 61728,
+        "required_for": [
+          "inference",
+          "language"
+        ]
+      },
+      {
+        "path": "google/umt5-xxl/special_tokens_map.json",
+        "sha256": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "size_bytes": 6623,
+        "required_for": [
+          "inference",
+          "language"
+        ]
+      },
+      {
+        "path": "google/umt5-xxl/spiece.model",
+        "sha256": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458",
+        "size_bytes": 4548313,
+        "required_for": [
+          "inference",
+          "language"
+        ]
+      },
+      {
+        "path": "google/umt5-xxl/tokenizer.json",
+        "sha256": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "size_bytes": 16837417,
+        "required_for": [
+          "inference",
+          "language"
+        ]
+      }
+    ],
+    "trees": [
+      {
+        "path": "google/umt5-xxl",
+        "sha256": "8a0796678759437cc8220f6ce5483c14585a9f45ce9a6f196c6d4e44affffafb",
+        "required_for": [
+          "inference",
+          "language"
+        ]
+      }
+    ]
+  },
+  "domino": {
+    "upstream_url": "https://github.com/H-EmbodVis/DOMINO.git",
+    "upstream_base_revision": "93d485a34a6e710bb4c895d83e2bb0520a9f169e",
+    "evaluated_revision": "9b1f34129323957baff35bcbc866fceca7e02779",
+    "license": "apache-2.0",
+    "patch": "third_party/domino/evaluated.patch",
+    "patch_sha256": "52e8b8dd18523b62daab14efd0f1acd60a5cf93fef257ab1d21294fa43f506ee",
+    "source_root": "external/DOMINO",
+    "source_tree_sha256": "54dd0280e44ea0539274365b7feaeba24e36b7629e8679c2999476addd9c314c",
+    "source_tree_excluded_prefixes": [
+      "assets/background_texture",
+      "assets/embodiments",
+      "assets/objects"
+    ],
+    "eval_policy": "script/eval_policy.py",
+    "eval_policy_sha256": "fec0002fe1e30833b225d3559b09b583a9a4f7a22c29bc54a3817eb70d1aea38",
+    "evaluated_python_runtime": [
+      {
+        "distribution": "sapien",
+        "version": "3.0.0b1",
+        "wheel_filename": "sapien-3.0.0b1-cp310-cp310-manylinux2014_x86_64.whl",
+        "wheel_sha256": "9763215d52374e48db16d8c2e89fb385a5625690c0c88cf2c636c1abe99aef6c",
+        "relative_path": "sapien/wrapper/urdf_loader.py",
+        "pristine_sha256": "eabba86fe7d244ce8d469010f96914010a8883ea5835c86a8bc58be310510683",
+        "evaluated_sha256": "13aad693f05663472a4f1b59ea34fb313db6ee2f1416fce19ad4830cfa588059",
+        "replacements": [
+          {
+            "before": "with open(urdf_file, \"r\") as f:",
+            "after": "with open(urdf_file, \"r\", encoding=\"utf-8\") as f:"
+          },
+          {
+            "before": "with open(srdf_file, \"r\") as f:",
+            "after": "with open(srdf_file, \"r\", encoding=\"utf-8\") as f:"
+          }
+        ]
+      },
+      {
+        "distribution": "mplib",
+        "version": "0.2.1",
+        "wheel_filename": "mplib-0.2.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "wheel_sha256": "87cd73ce6974bbb4035ddf941b4d05b3eafb071faf217c860f262be65581cbb4",
+        "relative_path": "mplib/planner.py",
+        "pristine_sha256": "785f77233baf4159f3327b664fae2507572c189223a6075f42546c1133ddfa0e",
+        "evaluated_sha256": "23c51d083ce1892e5fbd0e1473df432d1c33609e50bfac8bdf9e8bfcf6c2cf3c",
+        "replacements": [
+          {
+            "before": "if np.linalg.norm(delta_twist) < 1e-4 or collide or not within_joint_limit:",
+            "after": "if np.linalg.norm(delta_twist) < 1e-4 or not within_joint_limit:"
+          }
+        ]
+      }
+    ]
+  },
+  "robotwin_assets": {
+    "repo_id": "TianxingChen/RoboTwin2.0",
+    "repo_type": "dataset",
+    "revision": "9dc9299c163db059931898a9f0852098a61155a1",
+    "license": "mit",
+    "root": "external/robotwin-assets",
+    "archives": [
+      {
+        "path": "background_texture.zip",
+        "sha256": "54ede0fb5b783e0faa2bc98720d3affd6ca3bb9280b225b48c1aafaf31473070",
+        "size_bytes": 10970687027,
+        "extracts_to": "background_texture",
+        "tree_sha256": "51580363ca7432ff191dac8ccd8358c77814e73fd9fd417c9181f8470a9f207a",
+        "file_count": 11000,
+        "extracted_size_bytes": 11025457080
+      },
+      {
+        "path": "embodiments.zip",
+        "sha256": "6b87d7d55e106d8ff25917e0538eb1e177fc549280e8a742a8cec3cb9f953fc6",
+        "size_bytes": 219859313,
+        "extracts_to": "embodiments",
+        "tree_sha256": "5eba4076ce908d5601b431795c001b9e7a804a9ed79dd44835d50e58ec4a7d60",
+        "file_count": 229,
+        "extracted_size_bytes": 943584504
+      },
+      {
+        "path": "objects.zip",
+        "sha256": "6aa56b3cf1e1064f7c809308144da36b00815f8b137fef2d7e4de856f8becf27",
+        "size_bytes": 3737778549,
+        "extracts_to": "objects",
+        "tree_sha256": "52915ccc33aaf4a6ffa81db181b8c508fb4ae51b91648c18b5b750175b5a0bce",
+        "file_count": 9368,
+        "extracted_size_bytes": 4636111726
+      }
+    ]
+  },
+  "curobo": {
+    "upstream_url": "https://github.com/NVlabs/curobo.git",
+    "tag": "v0.7.8",
+    "revision": "d64c4b005459db10c5dd867d8b30a87d5bda9bdb",
+    "license": "NVIDIA License; non-commercial research or evaluation only",
+    "source_root": "external/curobo",
+    "source_tree_sha256": "9772e70f91cccef2d9aa679f0a657071a3b748d233c60ab1efe26d797a210cc1",
+    "evaluated_extensions": [
+      {
+        "module": "geom_cu",
+        "path": "src/curobo/curobolib/geom_cu.cpython-310-x86_64-linux-gnu.so",
+        "sha256": "806b8d2bf16cdd66bb108df7ed60a8f4d465d3bc3ae62501f4bca8826d9a8578",
+        "size_bytes": 2797032
+      },
+      {
+        "module": "kinematics_fused_cu",
+        "path": "src/curobo/curobolib/kinematics_fused_cu.cpython-310-x86_64-linux-gnu.so",
+        "sha256": "f21d840255cbfe95eaad1a8636e12078f9bcc59831ce217e3d3841f2d484d40a",
+        "size_bytes": 476792
+      },
+      {
+        "module": "lbfgs_step_cu",
+        "path": "src/curobo/curobolib/lbfgs_step_cu.cpython-310-x86_64-linux-gnu.so",
+        "sha256": "488dd0b40557208ed012ff080ebae603944d85dc06ed0af6d697e5f08fb1879d",
+        "size_bytes": 3798200
+      },
+      {
+        "module": "line_search_cu",
+        "path": "src/curobo/curobolib/line_search_cu.cpython-310-x86_64-linux-gnu.so",
+        "sha256": "477ce47d82ac8bf7204d3c542f8a818be3ee4fcd0d18cdae7ec57d17aa920b81",
+        "size_bytes": 327504
+      },
+      {
+        "module": "tensor_step_cu",
+        "path": "src/curobo/curobolib/tensor_step_cu.cpython-310-x86_64-linux-gnu.so",
+        "sha256": "febc76df31bf7e162a040bdefc0ffb7b9e7736de8cc18467c82568477c7c1671",
+        "size_bytes": 529976
+      }
+    ],
+    "evaluated_runtime": {
+      "python": "3.10.20",
+      "torch": "2.4.1+cu121",
+      "torch_cuda": "12.1",
+      "cuda_extension_runtime": "12.8",
+      "gpu_compute_capability": "9.0"
+    }
+  }
+}

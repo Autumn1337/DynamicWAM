@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools==83.0.0", "wheel==0.47.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dynamicwam"
+version = "0.1.0"
+description = "Exact-time motion-conditioned world-action model for dynamic manipulation"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "accelerate==1.14.0",
+    "decord==0.6.0",
+    "deepspeed==0.19.2",
+    "diffusers==0.39.0",
+    "einops==0.8.1",
+    "ftfy==6.3.1",
+    "h5py==3.16.0",
+    "huggingface-hub==1.22.0",
+    "matplotlib==3.10.9",
+    "numpy==2.2.6",
+    "opencv-python==5.0.0.93",
+    "PyYAML==6.0.3",
+    "regex==2026.6.28",
+    "safetensors==0.8.0",
+    "tensorboard==2.21.0",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "tqdm==4.68.4",
+    "transformers==5.0.0rc0",
+]
+
+[project.urls]
+Repository = "https://github.com/Autumn1337/DynamicWAM"
+
+[project.optional-dependencies]
+gpu = ["flash-attn==2.8.3.post1"]
+dev = [
+    "build==1.5.0",
+    "ruff==0.16.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"dynamicwam.vendor.wan" = ["LICENSE", "UPSTREAM.md"]
+
+[tool.ruff]
+extend-exclude = ["src/dynamicwam/vendor"]
+
+[tool.ruff.lint]
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "I",
+    "B",
+    "SIM",
+    "RUF",
+    "ARG",
+    "C4",
+    "PIE",
+    "RET",
+    "PERF",
+]
