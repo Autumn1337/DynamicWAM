@@ -1,4 +1,4 @@
-![DynamicWAM](assets/dynamicwam-github-banner.png)
+![DynamicWAM](assets/dynamicwam-github-banner-light.png)
 
 DynamicWAM is an exact-time motion-conditioned world-action model for dynamic
 bimanual manipulation. It augments rendered history flow with numeric motion
