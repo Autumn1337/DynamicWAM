@@ -1,24 +1,39 @@
-![DynamicWAM](assets/dynamicwam-github-banner-light.png)
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/dynamicwam-github-banner.png">
+  <img src="assets/dynamicwam-github-banner-light.png" width="820" alt="DynamicWAM">
+</picture>
+
+**Exact-time motion-conditioned world-action model for dynamic bimanual manipulation**
+
+<a href="https://dynamicwam.github.io/"><img src="https://img.shields.io/badge/Project%20Page-dynamicwam.github.io-1668E3?style=for-the-badge&labelColor=0D1424&logo=githubpages&logoColor=white" alt="Project page"></a>
+<a href="https://huggingface.co/KhalilGao/DynamicWAM/tree/925cbb7aef5033c924f809ae87479d39fe9f76ff"><img src="https://img.shields.io/badge/Checkpoint-Hugging%20Face-F5A623?style=for-the-badge&labelColor=0D1424&logo=huggingface&logoColor=F5A623" alt="Checkpoint"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-22C8E0?style=for-the-badge&labelColor=0D1424" alt="License"></a>
+<img src="https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-1668E3?style=for-the-badge&labelColor=0D1424&logo=python&logoColor=white" alt="Python 3.10-3.12">
+
+</div>
+
+---
 
 DynamicWAM is an exact-time motion-conditioned world-action model for dynamic
 bimanual manipulation. It augments rendered history flow with numeric motion
 tokens that preserve displacement magnitude, elapsed simulator time, velocity,
 and acceleration.
 
-[Project page](https://dynamicwam.github.io/) ·
-[Checkpoint](https://huggingface.co/KhalilGao/DynamicWAM/tree/925cbb7aef5033c924f809ae87479d39fe9f76ff) ·
-[Apache-2.0 license](LICENSE)
-
-## Method
-
-DynamicWAM uses two complementary motion representations:
-
-- **History flow** preserves where and in which direction the scene moved.
-- **Exact-time motion tokens** preserve how far and how quickly it moved.
-
 The released model conditions on four history-flow maps and four exact-time
 motion tokens; a 12-layer compact video expert and a 12-layer action expert
 exchange information through layer-wise joint attention.
+
+## Demo
+
+<div align="center">
+  <img src="assets/demo.gif" width="760" alt="Real-robot rollouts: a cube tracked along a compound path, then a turntable appearance never seen during training.">
+</div>
+
+Real-robot rollouts — a cube tracked along a compound path, then a turntable
+appearance never seen during training. Full video on the
+[project page](https://dynamicwam.github.io/).
 
 ## Results — DOMINO Level 1
 
@@ -106,6 +121,18 @@ scripts/train_all.sh
 
 `scripts/train.py` exposes the three stages individually: video-expert
 distillation, action-expert training, and joint fine-tuning.
+
+## Acknowledgements
+
+DynamicWAM builds on four upstream projects, pinned by revision in
+`manifests/external_assets.json`:
+
+| Project | Used for |
+|---|---|
+| [DOMINO](https://github.com/H-EmbodVis/DOMINO) | Dynamic manipulation benchmark, tasks, and instruction generator |
+| [Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) | Video-expert initialization and language preprocessing |
+| [RoboTwin 2.0](https://huggingface.co/datasets/TianxingChen/RoboTwin2.0) | Simulator assets |
+| [CuRobo](https://github.com/NVlabs/curobo) | Motion planning during evaluation |
 
 ## License
 
