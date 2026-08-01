@@ -41,6 +41,36 @@ Real-robot rollouts — a cube tracked along a compound path, then a turntable
 appearance never seen during training. Full video on the
 [project page](https://dynamicwam.github.io/).
 
+## Quick Start
+
+The shortest supported path verifies the released checkpoint and prepares the
+WAN assets required for model inference. It requires Linux x86_64, an NVIDIA
+GPU with a working CUDA toolchain, Python 3.10–3.12, and
+[`uv`](https://docs.astral.sh/uv/).
+
+```bash
+git clone https://github.com/Autumn1337/DynamicWAM.git
+cd DynamicWAM
+
+uv sync --extra dev
+uv pip install flash-attn==2.8.3.post1 --no-build-isolation
+
+uv run hf download KhalilGao/DynamicWAM \
+  --revision "925cbb7aef5033c924f809ae87479d39fe9f76ff" \
+  --include "external/checkpoints/DynamicWAM_full.pt" \
+  --include "configs/absolute_motion_v2.yaml" \
+  --local-dir .
+
+uv run python scripts/verify_checkpoints.py
+uv run python scripts/prepare_external.py wan --purpose inference
+uv run python scripts/verify_external.py wan-inference
+```
+
+A successful setup ends with `verified full checkpoint and config` and
+`verified external scope: wan-inference`. The checkpoint and model assets are
+then ready; continue with [Evaluation](#evaluation) to install DOMINO, RoboTwin,
+and CuRobo and run the supported end-to-end rollout entry point.
+
 ## Method overview
 
 | Path | What it provides | Where it enters |
