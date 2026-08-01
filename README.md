@@ -1,9 +1,6 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/dynamicwam-github-banner.png">
-  <img src="assets/dynamicwam-github-banner-light.png" width="820" alt="DynamicWAM">
-</picture>
+<img src="assets/dynamicwam-github-banner-light.png" width="820" alt="DynamicWAM">
 
 **Exact-time motion-conditioned world-action model for dynamic bimanual manipulation**
 
