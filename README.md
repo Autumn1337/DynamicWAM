@@ -4,10 +4,9 @@
 
 **Dual-path motion conditioning for World–Action Models in dynamic manipulation**
 
-<a href="https://dynamicwam.github.io/"><img src="https://img.shields.io/badge/Project%20Page-dynamicwam.github.io-1668E3?style=for-the-badge&labelColor=0D1424&logo=githubpages&logoColor=white" alt="Project page"></a>
-<a href="https://huggingface.co/KhalilGao/DynamicWAM/tree/925cbb7aef5033c924f809ae87479d39fe9f76ff"><img src="https://img.shields.io/badge/Checkpoint-Hugging%20Face-F5A623?style=for-the-badge&labelColor=0D1424&logo=huggingface&logoColor=F5A623" alt="Checkpoint"></a>
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-22C8E0?style=for-the-badge&labelColor=0D1424" alt="License"></a>
-<img src="https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-1668E3?style=for-the-badge&labelColor=0D1424&logo=python&logoColor=white" alt="Python 3.10-3.12">
+<a href="https://arxiv.org/abs/2608.00793"><img src="https://img.shields.io/badge/arXiv%202608.00793-B31B1B?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv"></a>
+<a href="https://dynamicwam.github.io/"><img src="https://img.shields.io/badge/Project%20Page-1668E3?style=for-the-badge&logo=githubpages&logoColor=white" alt="Project page"></a>
+<a href="https://huggingface.co/KhalilGao/DynamicWAM/tree/925cbb7aef5033c924f809ae87479d39fe9f76ff"><img src="https://img.shields.io/badge/Hugging%20Face-F5A623?style=for-the-badge&logo=huggingface&logoColor=white" alt="Checkpoint"></a>
 
 </div>
 
@@ -75,7 +74,7 @@ and CuRobo and run the supported end-to-end rollout entry point.
 
 | Path | What it provides | Where it enters |
 |---|---|---|
-| History flow (\(K{=}4\) rendered RGB maps) | Spatial structure, direction, temporal ordering | Frozen video VAE → video expert |
+| History flow ($K{=}4$ rendered RGB maps) | Spatial structure, direction, temporal ordering | Frozen video VAE → video expert |
 | Kinematic tokens (12-D descriptors × 4 intervals) | Displacement scale, duration, velocity, acceleration | Action expert |
 | Joint world–action attention | Coupled future-video prediction and action generation | Every transformer block |
 
@@ -92,8 +91,8 @@ synchronous protocol with 16 committed joint-position actions per observation:
 | Method | Latency (ms) ↓ | SR (%) ↑ | MS ↑ |
 |---|---:|---:|---:|
 | OpenVLA | 173.6 | 1.5 | 6.1 |
-| \(\pi_0\)-FAST | 119.9 | 3.5 | 20.9 |
-| \(\pi_{0.5}\) | 59.1 | 9.6 | 26.2 |
+| $\pi_0$-FAST | 119.9 | 3.5 | 20.9 |
+| $\pi_{0.5}$ | 59.1 | 9.6 | 26.2 |
 | PUMA | 85.4 | 17.2 | 35.0 |
 | InternVLA-A1.5 | 552.2 | 29.3 | 42.5 |
 | **DynamicWAM (ours)** | 173.7 | **38.2** | **53.2** |
@@ -116,7 +115,7 @@ synchronous protocols:
 | Method | L1 | L2 | L3 | Avg. |
 |---|---:|---:|---:|---:|
 | InternVLA-A1.5 | 0.00 | 0.00 | 0.00 | 0.00 |
-| \(\pi_{0.5}\) | 32.50 | 38.75 | 0.00 | 23.75 |
+| $\pi_{0.5}$ | 32.50 | 38.75 | 0.00 | 23.75 |
 | DynamicVLA | 30.00 | 33.75 | 0.00 | 21.25 |
 | DynamicWAM (w/o flow & motion) | 37.50 | 35.00 | 2.50 | 25.00 |
 | DynamicWAM (w/o motion) | 51.25 | 42.50 | 15.00 | 36.25 |
