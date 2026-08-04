@@ -215,11 +215,14 @@ DynamicWAM builds on four upstream projects, pinned by revision in
 If you find this work useful, please cite:
 
 ```bibtex
-@inproceedings{dynamicwam2027,
-  title     = {DynamicWAM: Dual-Path Motion Conditioning for World--Action Models in Dynamic Manipulation},
-  author    = {},
-  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
-  year      = {2027}
+@misc{lou2026dynamicwamdualpathmotionconditioning,
+  title={DynamicWAM: Dual-Path Motion Conditioning for World-Action Models in Dynamic Manipulation},
+  author={Yunfan Lou and Hewen Gao and Xiyu Zhu and Zhuoran Qiao and Xuan Han and Yifan Yang and Yifan Ye and Boxian Yao and Zhibo Pang},
+  year={2026},
+  eprint={2608.00793},
+  archivePrefix={arXiv},
+  primaryClass={cs.RO},
+  url={https://arxiv.org/abs/2608.00793},
 }
 ```
 
