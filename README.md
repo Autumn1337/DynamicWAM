@@ -208,6 +208,7 @@ DynamicWAM builds on four upstream projects, pinned by revision in
 | [Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) | Video-expert initialization and language preprocessing |
 | [RoboTwin 2.0](https://huggingface.co/datasets/TianxingChen/RoboTwin2.0) | Simulator assets |
 | [CuRobo](https://github.com/NVlabs/curobo) | Motion planning during evaluation |
+# We will continue to update
 
 ## Citation
 
